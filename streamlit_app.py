@@ -323,14 +323,22 @@ def calculate_news2(obs: Observation) -> Tuple[Dict[str, int], int]:
     return per_vital, total
 
 
-def clamp_observation(obs: Observation) -> Observation:
-    hr = max(30, min(142, obs.hr))
-    bp = max(70, min(192, obs.bp))
-    temp = round(max(34.0, min(41.2, obs.temp)), 1)
-    resp = max(6, min(32, obs.resp))
-    ox = max(80, min(102, obs.ox_sats))
-    insp = max(21, min(102, obs.insp_ox))
-    return Observation(hr=hr, bp=bp, temp=temp, resp=resp, ox_sats=ox, insp_ox=insp)
+def clamp_observation(obs: Observation, base_dir: Path) -> Observation:
+    """Clamp observation to the min/max of the selected membership grids."""
+    hr_mf, bp_mf, temp_mf, resp_mf, ox_mf, insp_mf = load_membership_functions(base_dir)
+
+    def clamp_val(val, series, *, round_1=False):
+        lo, hi = float(series.min()), float(series.max())
+        out = max(lo, min(hi, val))
+        return round(out, 1) if round_1 else out
+
+    hr = clamp_val(obs.hr, hr_mf.df["Value"])
+    bp = clamp_val(obs.bp, bp_mf.df["Value"])
+    temp = clamp_val(obs.temp, temp_mf.df["Value"], round_1=True)
+    resp = clamp_val(obs.resp, resp_mf.df["Value"])
+    ox = clamp_val(obs.ox_sats, ox_mf.df["Value"])
+    insp = clamp_val(obs.insp_ox, insp_mf.df["Value"])
+    return Observation(hr=int(hr), bp=int(bp), temp=float(temp), resp=float(resp), ox_sats=float(ox), insp_ox=float(insp))
 
 
 def interpret_table(all_firings: Dict[str, Dict[str, float]], scores: Dict[str, float], news_scores: Dict[str, int], obs: Observation) -> pd.DataFrame:
@@ -448,7 +456,7 @@ def main() -> None:
 
     if submitted:
         raw_obs = Observation(hr=int(hr), bp=int(bp), temp=float(temp), resp=int(resp), ox_sats=int(ox), insp_ox=int(insp))
-        obs = clamp_observation(raw_obs)
+        obs = clamp_observation(raw_obs, selected_dir)
         if obs != raw_obs:
             st.info("Inputs were clamped to the membership function range used in the model.")
         all_firings = firings(obs.hr, obs.bp, obs.temp, obs.resp, obs.ox_sats, obs.insp_ox, selected_dir)
