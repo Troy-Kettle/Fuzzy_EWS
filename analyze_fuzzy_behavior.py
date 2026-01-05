@@ -1,3 +1,16 @@
+"""
+Fuzzy EWS Behavior Analysis
+============================
+Systematically investigates the behaviour of the fuzzy model across:
+  - Single-vital sweeps (2D line plots)
+  - Pair-vital sweeps (3D surfaces and heatmaps)
+
+Key diagnostics:
+  - Baseline score at "normal" values
+  - Score contribution breakdown per vital
+  - Full 0-18 Y-axis scaling for comparability
+"""
+
 import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -19,13 +32,20 @@ from streamlit_app import (
 
 plt.switch_backend("Agg")
 
-NORMAL_OBS = Observation(hr=80, bp=120, temp=36.8, resp=16, ox_sats=98, insp_ox=21)
+# Clinical normal values (mid-range of "No concern" membership)
+NORMAL_OBS = Observation(hr=75, bp=120, temp=36.8, resp=14, ox_sats=98, insp_ox=21)
 
 
 def compute_total(obs: Observation, base_dir: Path) -> float:
     all_firings = firings(obs.hr, obs.bp, obs.temp, obs.resp, obs.ox_sats, obs.insp_ox, base_dir)
     scores = calculate_fuzzy_ews_additive(all_firings)
     return scores.get("total", 0.0)
+
+
+def compute_breakdown(obs: Observation, base_dir: Path) -> Dict[str, float]:
+    """Return per-vital scores plus total."""
+    all_firings = firings(obs.hr, obs.bp, obs.temp, obs.resp, obs.ox_sats, obs.insp_ox, base_dir)
+    return calculate_fuzzy_ews_additive(all_firings)
 
 
 def get_ranges(base_dir: Path) -> Dict[str, Tuple[float, float]]:
@@ -54,12 +74,18 @@ def replace_obs(base: Observation, **kwargs) -> Observation:
 
 
 def sweep_single(vital_key: str, values: np.ndarray, base_obs: Observation, base_dir: Path) -> pd.DataFrame:
+    """Sweep a single vital and capture per-vital breakdown."""
     rows = []
     for v in values:
         obs = replace_obs(base_obs, **{vital_key: v})
         obs = clamp_observation(obs, base_dir)
-        score = compute_total(obs, base_dir)
-        rows.append({vital_key: float(v), "fuzzy_score": score})
+        breakdown = compute_breakdown(obs, base_dir)
+        row = {vital_key: float(v), "fuzzy_score": breakdown["total"]}
+        # Add per-vital breakdown
+        for k, s in breakdown.items():
+            if k != "total":
+                row[f"score_{k.replace(' ', '_')}"] = s
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -74,13 +100,28 @@ def sweep_pair(v1: str, v2: str, vals1: np.ndarray, vals2: np.ndarray, base_obs:
     return X, Z, Y
 
 
-def plot_single(df: pd.DataFrame, vital_key: str, label: str, unit: str, output_path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(df[vital_key], df["fuzzy_score"], lw=2)
-    ax.set_xlabel(f"{label} ({unit})")
-    ax.set_ylabel("Fuzzy score (0-18)")
-    ax.set_title(f"Fuzzy score vs {label}")
+def plot_single(df: pd.DataFrame, vital_key: str, label: str, unit: str, normal_value: float, output_path: Path) -> None:
+    """Plot single-vital sweep with fixed 0-18 Y scale and normal marker."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(df[vital_key], df["fuzzy_score"], lw=2, label="Total fuzzy score", color="navy")
+    
+    # Add normal value marker
+    ax.axvline(normal_value, color="green", linestyle="--", alpha=0.7, label=f"Normal ({normal_value})")
+    
+    # Find score at normal value
+    idx_closest = (df[vital_key] - normal_value).abs().idxmin()
+    score_at_normal = df.loc[idx_closest, "fuzzy_score"]
+    ax.scatter([normal_value], [score_at_normal], color="green", s=100, zorder=5)
+    ax.annotate(f"{score_at_normal:.2f}", (normal_value, score_at_normal), 
+                textcoords="offset points", xytext=(10, 5), fontsize=9, color="green")
+    
+    ax.set_xlabel(f"{label} ({unit})", fontsize=11)
+    ax.set_ylabel("Fuzzy score", fontsize=11)
+    ax.set_ylim(0, 18)
+    ax.set_title(f"Fuzzy Score vs {label}\n(other vitals held at normal)", fontsize=12)
     ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right")
+    
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
@@ -88,14 +129,31 @@ def plot_single(df: pd.DataFrame, vital_key: str, label: str, unit: str, output_
 
 
 def plot_pair(X: np.ndarray, Z: np.ndarray, Y: np.ndarray, v1: str, v2: str, label1: str, label2: str, unit1: str, unit2: str, output_path: Path) -> None:
-    fig = plt.figure(figsize=(8, 6))
-    ax = fig.add_subplot(111, projection="3d")
-    surf = ax.plot_surface(X, Z, Y, cmap="viridis", edgecolor="none", alpha=0.9)
-    ax.set_xlabel(f"{label1} ({unit1})")
-    ax.set_ylabel(f"{label2} ({unit2})")
-    ax.set_zlabel("Fuzzy score (0-18)")
-    ax.set_title(f"Fuzzy score vs {label1} & {label2}")
-    fig.colorbar(surf, ax=ax, shrink=0.6, label="Fuzzy score")
+    """Plot pair sweep as 3D surface + 2D heatmap side by side, with fixed 0-18 Z scale."""
+    fig = plt.figure(figsize=(14, 5))
+    
+    # 3D surface
+    ax1 = fig.add_subplot(121, projection="3d")
+    surf = ax1.plot_surface(X, Z, Y, cmap="viridis", edgecolor="none", alpha=0.9)
+    ax1.set_xlabel(f"{label1} ({unit1})")
+    ax1.set_ylabel(f"{label2} ({unit2})")
+    ax1.set_zlabel("Fuzzy score")
+    ax1.set_zlim(0, 18)
+    ax1.set_title(f"Fuzzy Score: {label1} × {label2}")
+    fig.colorbar(surf, ax=ax1, shrink=0.5, label="Score")
+    
+    # 2D heatmap
+    ax2 = fig.add_subplot(122)
+    im = ax2.imshow(Y, extent=[X.min(), X.max(), Z.min(), Z.max()], 
+                   origin="lower", aspect="auto", cmap="viridis", vmin=0, vmax=18)
+    ax2.set_xlabel(f"{label1} ({unit1})")
+    ax2.set_ylabel(f"{label2} ({unit2})")
+    ax2.set_title("Heatmap View")
+    fig.colorbar(im, ax=ax2, label="Fuzzy score")
+    
+    # Add contour lines
+    ax2.contour(X, Z, Y, levels=[4, 8, 12], colors=["yellow", "orange", "red"], linewidths=1.5)
+    
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
@@ -123,11 +181,49 @@ def main():
 
     ranges = get_ranges(base_dir)
     out_dir = args.output_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # === BASELINE DIAGNOSTICS ===
+    print(f"\n{'='*60}")
+    print(f"FUZZY EWS BEHAVIOR ANALYSIS")
+    print(f"Membership set: {args.membership_set}")
+    print(f"{'='*60}")
+    
+    print(f"\nNormal observation: {NORMAL_OBS}")
+    baseline = compute_breakdown(NORMAL_OBS, base_dir)
+    print(f"\nBaseline scores at normal values:")
+    for k, v in baseline.items():
+        print(f"  {k:20s}: {v:.4f}")
+    print(f"\nNote: Baseline ~{baseline['total']:.2f} means even 'normal' values produce some concern")
+    print(f"      due to soft sigmoid transitions in membership functions.\n")
+    
+    # Save baseline to file
+    with open(out_dir / "baseline_diagnostics.txt", "w") as f:
+        f.write(f"Membership set: {args.membership_set}\n")
+        f.write(f"Normal observation: {NORMAL_OBS}\n\n")
+        f.write("Baseline scores at normal values:\n")
+        for k, v in baseline.items():
+            f.write(f"  {k:20s}: {v:.4f}\n")
+        f.write(f"\nRanges from membership CSVs:\n")
+        for k, (lo, hi) in ranges.items():
+            f.write(f"  {k:10s}: {lo:.1f} - {hi:.1f}\n")
+
+    # Normal values mapping for plotting
+    normal_values = {
+        "hr": NORMAL_OBS.hr,
+        "bp": NORMAL_OBS.bp,
+        "temp": NORMAL_OBS.temp,
+        "resp": NORMAL_OBS.resp,
+        "ox_sats": NORMAL_OBS.ox_sats,
+        "insp_ox": NORMAL_OBS.insp_ox,
+        "insp_lpm": 0.0,  # 0 L/min = 21% FiO2 = room air
+    }
 
     # Single-vital sweeps
     single_defs = [
         ("hr", "Heart rate", "bpm", np.linspace(*ranges["hr"], args.single_points)),
         ("bp", "Systolic BP", "mmHg", np.linspace(*ranges["bp"], args.single_points)),
+        ("temp", "Temperature", "°C", np.linspace(*ranges["temp"], args.single_points)),
         ("resp", "Respiratory rate", "breaths/min", np.linspace(*ranges["resp"], args.single_points)),
         ("ox_sats", "Oxygen saturation", "%", np.linspace(*ranges["ox_sats"], args.single_points)),
         ("insp_ox", "Inspired O2 (FiO2 %)", "%", np.linspace(*ranges["insp_ox"], args.single_points)),
@@ -139,17 +235,19 @@ def main():
     single_defs.append(("insp_lpm", "Inspired O2", "L/min", np.linspace(0.0, lpm_hi, args.single_points)))
 
     single_dir = out_dir / "single_vital"
+    print("Generating single-vital sweeps...")
     for key, label, unit, values in single_defs:
+        print(f"  {label}...")
         if key == "insp_lpm":
             fio2_values = 21.0 + 4.0 * values
             df = sweep_single("insp_ox", fio2_values, NORMAL_OBS, base_dir)
             df.insert(0, "insp_lpm", values)
             csv_path = single_dir / f"{key}.csv"
-            plot_single(df, "insp_lpm", label, unit, single_dir / f"{key}.png")
+            plot_single(df, "insp_lpm", label, unit, normal_values[key], single_dir / f"{key}.png")
         else:
             df = sweep_single(key, values, NORMAL_OBS, base_dir)
             csv_path = single_dir / f"{key}.csv"
-            plot_single(df, key, label, unit, single_dir / f"{key}.png")
+            plot_single(df, key, label, unit, normal_values[key], single_dir / f"{key}.png")
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(csv_path, index=False)
 
@@ -182,7 +280,9 @@ def main():
         k: np.linspace(*ranges[k], args.pair_grid) for k in ["hr", "bp", "resp", "ox_sats", "insp_ox", "temp"]
     }
 
+    print("\nGenerating pair-vital sweeps...")
     for v1, v2, label1, label2, unit1, unit2 in pair_candidates:
+        print(f"  {label1} × {label2}...")
         X_vals = vals_cache[v1]
         Z_vals = vals_cache[v2]
         X, Z, Y = sweep_pair(v1, v2, X_vals, Z_vals, NORMAL_OBS, base_dir)
@@ -190,6 +290,11 @@ def main():
         # Save underlying grid
         pair_dir.mkdir(parents=True, exist_ok=True)
         np.savez(pair_dir / f"{v1}__{v2}.npz", X=X, Z=Z, Y=Y, v1=v1, v2=v2, label1=label1, label2=label2, unit1=unit1, unit2=unit2)
+    
+    print(f"\n{'='*60}")
+    print(f"Analysis complete!")
+    print(f"Output directory: {out_dir.absolute()}")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":

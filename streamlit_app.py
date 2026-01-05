@@ -21,6 +21,26 @@ class Observation:
     insp_ox: float
 
 
+def _interp_lookup(fs: dict, inp: float) -> float:
+    """Lookup with linear interpolation for non-integer inputs."""
+    if inp in fs:
+        return float(fs[inp])
+    keys = sorted(fs.keys())
+    if not keys:
+        return 0.0
+    if inp <= keys[0]:
+        return float(fs[keys[0]])
+    if inp >= keys[-1]:
+        return float(fs[keys[-1]])
+    # Find bracketing keys
+    for i in range(len(keys) - 1):
+        if keys[i] <= inp < keys[i + 1]:
+            lo, hi = keys[i], keys[i + 1]
+            t = (inp - lo) / (hi - lo)
+            return float(fs[lo]) * (1 - t) + float(fs[hi]) * t
+    return 0.0
+
+
 class custom_mf_7_var:
     """Input membership function for vitals with 7 categories (e.g., HR, BP, Temp, Resp)."""
 
@@ -56,7 +76,7 @@ class custom_mf_7_var:
     def __call__(self, inp: float) -> Dict[str, float]:
         out: Dict[str, float] = {}
         for label, fs in zip(self.labels, self.fs):
-            out[label] = fs.get(inp, 0.0)
+            out[label] = _interp_lookup(fs, inp)
         return out
 
 
@@ -81,7 +101,7 @@ class custom_mf_3_var_up:
     def __call__(self, inp: float) -> Dict[str, float]:
         out: Dict[str, float] = {}
         for label, fs in zip(self.labels, self.fs):
-            out[label] = fs.get(inp, 0.0)
+            out[label] = _interp_lookup(fs, inp)
         return out
 
 
@@ -106,7 +126,7 @@ class custom_mf_3_var_down:
     def __call__(self, inp: float) -> Dict[str, float]:
         out: Dict[str, float] = {}
         for label, fs in zip(self.labels, self.fs):
-            out[label] = fs.get(inp, 0.0)
+            out[label] = _interp_lookup(fs, inp)
         return out
 
 
@@ -205,9 +225,14 @@ def map_to_concern_levels(vital_memberships: Dict[str, float]) -> Dict[str, floa
 
 
 def defuzz_vital_centroid(concern_levels: Dict[str, float]) -> float:
-    # Avoid a non-zero baseline when only the "No concern" set is active
-    if concern_levels.get("No concern", 0.0) > 0 and all(
-        level == "No concern" or firing == 0 for level, firing in concern_levels.items()
+    # Ignore very small firings caused by overlapping membership edges
+    # which can otherwise produce a small non-zero centroid for normal inputs.
+    MIN_FIRING = 0.05
+    concern = {k: (v if v >= MIN_FIRING else 0.0) for k, v in concern_levels.items()}
+
+    # If only the "No concern" set remains active, return exact zero.
+    if concern.get("No concern", 0.0) > 0 and all(
+        (level == "No concern") or (firing == 0.0) for level, firing in concern.items()
     ):
         return 0.0
 
@@ -218,7 +243,7 @@ def defuzz_vital_centroid(concern_levels: Dict[str, float]) -> float:
         x = i / 100.0
         output_memberships = cache[x]
         aggregated = 0.0
-        for level, firing in concern_levels.items():
+        for level, firing in concern.items():
             if firing > 0:
                 membership = output_memberships.get(level, 0)
                 aggregated = max(aggregated, min(firing, membership))
