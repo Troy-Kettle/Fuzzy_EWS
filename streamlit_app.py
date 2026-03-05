@@ -1,5 +1,6 @@
 import altair as alt
 import ast
+import math
 import pandas as pd
 import streamlit as st
 from functools import lru_cache
@@ -12,9 +13,6 @@ DATA_DIR_SIGMOID = Path(__file__).parent / "generated_membership_data" / "sigmoi
 # NOTE: Generated trapezoidal outputs have been removed; only sigmoid generation is supported.
 PART2_SURVEY_PATH = (
     Path(__file__).parent / "data" / "membership_function_plots" / "csv_data" / "part2_raw.xlsx"
-)
-PART3_SURVEY_PATH = (
-    Path(__file__).parent / "data" / "membership_function_plots" / "part3_raw.xlsx"
 )
 
 PART2_COMBINATIONS = {
@@ -1278,90 +1276,10 @@ def _render_it2_tab(prefix: str) -> None:
                 )
 
 
-def _temporal_delta_memberships(delta: float) -> Dict[str, float]:
-    """Fuzzify snapshot score delta into 5 linguistic terms.
-
-    Input: delta = snapshot_now - snapshot_prev.
-    Positive = worsening, negative = improving.
-
-    MF shapes (triangular / trapezoidal shoulders):
-      Big improvement:     full at d <= -3, ramp to 0 at d = -1
-      Small improvement:   triangle(-3, -1, 0)
-      Stable:              triangle(-1, 0, +1)
-      Small deterioration: triangle(0, +1, +3)
-      Big deterioration:   0 at d <= +1, ramp to full at d = +3
-    """
-    d = float(delta)
-    big_improve = max(0.0, min(1.0, (-1.0 - d) / 2.0))
-    small_improve = max(0.0, min((d + 3.0) / 2.0, -d / 1.0))
-    stable = max(0.0, min((d + 1.0) / 1.0, (1.0 - d) / 1.0))
-    small_deter = max(0.0, min(d / 1.0, (3.0 - d) / 2.0))
-    big_deter = max(0.0, min(1.0, (d - 1.0) / 2.0))
-    return {
-        "Big improvement": big_improve,
-        "Small improvement": small_improve,
-        "Stable": stable,
-        "Small deterioration": small_deter,
-        "Big deterioration": big_deter,
-    }
-
-
-def _temporal_fuzzy_adjustment(delta: float) -> float:
-    """5-rule fuzzy inference: map snapshot score delta to a temporal adjustment.
-
-    Rules:
-      IF delta is Big improvement     THEN adjustment is -2.0
-      IF delta is Small improvement   THEN adjustment is -0.75
-      IF delta is Stable              THEN adjustment is  0.0
-      IF delta is Small deterioration THEN adjustment is +0.75
-      IF delta is Big deterioration   THEN adjustment is +2.0
-
-    Defuzzified via weighted-average of singleton consequents.
-    """
-    mf = _temporal_delta_memberships(delta)
-    consequents = {
-        "Big improvement": -2.0,
-        "Small improvement": -0.75,
-        "Stable": 0.0,
-        "Small deterioration": 0.75,
-        "Big deterioration": 2.0,
-    }
-    num = sum(mf[k] * consequents[k] for k in mf)
-    den = sum(mf.values())
-    if den == 0.0:
-        return 0.0
-    return num / den
-
-
 # ---------------------------------------------------------------------------
-# Per-vital temporal trend nudge (Part 3 survey-driven)
+# Per-vital temporal adjustment (two-step: EWMA + worsening-trend factor)
 # ---------------------------------------------------------------------------
 
-# Part 3 scenario-to-vital mapping.
-# Each scenario presented 5 readings over 72 h with ONE vital bolded as the
-# focus.  Three trend types per vital (except temperature which has two):
-#   "stable"       – vital stays at an abnormal level throughout
-#   "deteriorating" – vital trends from normal to abnormal
-#   "recovering"   – vital spikes to abnormal then returns toward normal
-#
-# Sc 1  HR  stable elevated   | Sc  8  RR  deteriorating
-# Sc 2  HR  deteriorating     | Sc  9  RR  spike & recover
-# Sc 3  HR  spike & recover   | Sc 10  Temp deteriorating
-# Sc 4  BP  stable low        | Sc 11  Temp spike & recover
-# Sc 5  BP  deteriorating     | Sc 12  SpO2 stable low
-# Sc 6  BP  dip & recover     | Sc 13  SpO2 deteriorating
-# Sc 7  RR  stable elevated   | Sc 14  SpO2 dip & recover
-
-PART3_VITAL_SCENARIOS: Dict[str, Dict[str, int]] = {
-    "heart rate":        {"stable": 1,  "deteriorating": 2,  "recovering": 3},
-    "blood pressure":    {"stable": 4,  "deteriorating": 5,  "recovering": 6},
-    "respiratory rate":  {"stable": 7,  "deteriorating": 8,  "recovering": 9},
-    "temperature":       {              "deteriorating": 10, "recovering": 11},
-    "oxygen saturation": {"stable": 12, "deteriorating": 13, "recovering": 14},
-}
-PART3_MAX_CONCERN = 15.0
-
-# Per-vital score keys stored in each timeline entry
 _PV_KEYS: Dict[str, str] = {
     "heart rate": "pv_heart_rate",
     "blood pressure": "pv_blood_pressure",
@@ -1372,66 +1290,11 @@ _PV_KEYS: Dict[str, str] = {
 }
 
 
-@lru_cache(maxsize=1)
-def _load_part3_mean_by_id() -> Dict[int, float]:
-    """Return mean clinician concern per Part 3 scenario ID (0-15 scale)."""
-    if not PART3_SURVEY_PATH.exists():
-        return {}
-    df = pd.read_excel(PART3_SURVEY_PATH)
-    if "part3Data" not in df.columns:
-        return {}
-    scores_by_id: Dict[int, list] = {}
-    for raw in df["part3Data"].dropna():
-        try:
-            entries = ast.literal_eval(raw) if isinstance(raw, str) else raw
-        except Exception:
-            continue
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            try:
-                sid = int(entry.get("id"))
-                concern = float(entry.get("concernLevel"))
-            except Exception:
-                continue
-            scores_by_id.setdefault(sid, []).append(concern)
-    return {
-        sid: sum(vals) / len(vals)
-        for sid, vals in scores_by_id.items()
-        if vals
-    }
-
-
-def load_part3_concern_weights() -> Dict[str, Dict[str, float]]:
-    """Per-vital, per-trend-type concern weights from Part 3 survey.
-
-    Returns e.g.:
-      {"heart rate": {"stable": 2.72, "deteriorating": 5.93, "recovering": 4.72},
-       "blood pressure": {"stable": 3.12, "deteriorating": 8.90, "recovering": 6.25},
-       ...}
-    Inspired oxygen is not covered in Part 3 and will be absent.
-    """
-    mean_by_id = _load_part3_mean_by_id()
-    if not mean_by_id:
-        return {}
-    weights: Dict[str, Dict[str, float]] = {}
-    for vital, trend_ids in PART3_VITAL_SCENARIOS.items():
-        vw: Dict[str, float] = {}
-        for trend_type, sid in trend_ids.items():
-            if sid in mean_by_id:
-                vw[trend_type] = mean_by_id[sid]
-        if vw:
-            weights[vital] = vw
-    return weights
-
-
 @dataclass(frozen=True)
 class TemporalConfig:
+    ewma_alpha: float = 0.7
+    trend_beta: float = 2.0
     window_hours: float = 24.0
-    min_observations: int = 3
-    min_gap_minutes: float = 30.0
-    ewma_alpha: float = 0.3
-    slope_stable_threshold: float = 0.02
 
 
 def _ewma(values: list, alpha: float) -> list:
@@ -1458,165 +1321,98 @@ def _linear_slope(times_hours: list, values: list) -> float:
     return ss_tv / ss_tt
 
 
-def compute_per_vital_trends(
+def _compute_temporal_adjusted_scores(
     timeline: list,
     config: TemporalConfig,
 ) -> Dict[str, Dict]:
-    """Compute per-vital trend over the lookback window.
+    """Two-step per-vital temporal adjustment.
 
-    For each vital returns:
-      trend        – 'deteriorating' | 'stable' | 'improving' | 'insufficient_data'
-      slope        – raw slope (score units / hour)
-      trend_factor – normalised to [-1, +1]  (+1 = strongly worsening)
-      n_valid      – observations used
-      ewma_scores  – EWMA-smoothed per-vital scores used
+    Step 1: EWMA of per-vital concern scores (0-3) over the full timeline,
+            with smoothing parameter alpha.  Captures the "memory" of the
+            vital sign, including any recent instability.
+
+    Step 2: Linear trend in RAW (non-EWMA) concern scores over the look-back
+            window.  If the trend is positive (worsening), a sigmoid factor
+            controlled by beta pushes the score upward.  Negative (improving)
+            or zero (stable) trends produce no adjustment.
+
+    The adjusted score is guaranteed to remain in [0, 3].
     """
-    if len(timeline) < 2:
-        return {v: {"trend": "insufficient_data", "slope": 0.0,
-                     "trend_factor": 0.0, "n_valid": len(timeline),
-                     "ewma_scores": []} for v in _PV_KEYS}
+    if not timeline:
+        return {}
 
+    results: Dict[str, Dict] = {}
     latest_t = float(timeline[-1]["t_minutes"])
     window_min = config.window_hours * 60.0
 
-    results: Dict[str, Dict] = {}
     for vital, pv_key in _PV_KEYS.items():
-        valid: list[Tuple[float, float]] = []
+        raw_scores: list[float] = []
+        times_min: list[float] = []
         for entry in timeline:
-            t = float(entry["t_minutes"])
-            if latest_t - t > window_min:
-                continue
             if pv_key not in entry:
                 continue
-            if valid and (t - valid[-1][0]) < config.min_gap_minutes:
-                continue
-            valid.append((t, float(entry[pv_key])))
+            raw_scores.append(float(entry[pv_key]))
+            times_min.append(float(entry["t_minutes"]))
 
-        if len(valid) < config.min_observations:
+        if not raw_scores:
             results[vital] = {
-                "trend": "insufficient_data",
-                "slope": 0.0,
-                "trend_factor": 0.0,
-                "n_valid": len(valid),
-                "ewma_scores": [],
+                "raw_scores": [], "ewma_scores": [],
+                "ewma_current": 0.0, "trend_slope": 0.0,
+                "trend_factor": 0.0, "adjusted_score": 0.0,
+                "n_obs": 0, "n_trend_obs": 0,
             }
             continue
 
-        times_min = [v[0] for v in valid]
-        scores = [v[1] for v in valid]
-        smoothed = _ewma(scores, config.ewma_alpha)
+        # Step 1: EWMA of concern scores over the full timeline
+        ewma_scores = _ewma(raw_scores, config.ewma_alpha)
+        ewma_current = ewma_scores[-1]
 
-        t0 = times_min[0]
-        times_h = [(t - t0) / 60.0 for t in times_min]
-        slope = _linear_slope(times_h, smoothed)
+        # Step 2: linear trend in RAW concern scores within the look-back window
+        window_raw: list[float] = []
+        window_times: list[float] = []
+        for t, s in zip(times_min, raw_scores):
+            if latest_t - t <= window_min:
+                window_raw.append(s)
+                window_times.append(t)
 
-        max_slope = 3.0 / max(config.window_hours, 1.0)
-        trend_factor = max(-1.0, min(1.0, slope / max_slope))
+        slope = 0.0
+        if len(window_raw) >= 2:
+            t0 = window_times[0]
+            window_times_h = [(t - t0) / 60.0 for t in window_times]
+            slope = _linear_slope(window_times_h, window_raw)
 
-        if abs(trend_factor) < config.slope_stable_threshold:
-            trend = "stable"
-        elif trend_factor > 0:
-            trend = "deteriorating"
+        # Sigmoid trend factor: only when slope > 0 (worsening)
+        if slope > 0:
+            trend_factor = 2.0 / (1.0 + math.exp(-config.trend_beta * slope)) - 1.0
         else:
-            trend = "improving"
+            trend_factor = 0.0
+
+        # Push EWMA toward 3 proportionally — guarantees result in [0, 3]
+        adjusted = ewma_current + trend_factor * (3.0 - ewma_current)
+        adjusted = max(0.0, min(3.0, adjusted))
 
         results[vital] = {
-            "trend": trend,
-            "slope": round(slope, 4),
+            "raw_scores": [round(s, 3) for s in raw_scores],
+            "ewma_scores": [round(s, 3) for s in ewma_scores],
+            "ewma_current": round(ewma_current, 3),
+            "trend_slope": round(slope, 4),
             "trend_factor": round(trend_factor, 4),
-            "n_valid": len(valid),
-            "ewma_scores": [round(s, 3) for s in smoothed],
+            "adjusted_score": round(adjusted, 3),
+            "n_obs": len(raw_scores),
+            "n_trend_obs": len(window_raw),
         }
+
     return results
 
 
-def _select_concern(
-    vital: str,
-    trend_label: str,
-    concern_weights: Dict[str, Dict[str, float]],
-) -> float:
-    """Pick the trend-specific Part 3 concern weight for a vital.
-
-    Maps the detected trend classification to the matching scenario type:
-      deteriorating  -> "deteriorating" scenario concern
-      improving      -> "recovering" scenario concern
-      stable         -> "stable" scenario concern (if available, else mean of others)
-      insufficient   -> 0 (no nudge)
-
-    Vitals absent from Part 3 (e.g. inspired oxygen) return 0.
-    """
-    vw = concern_weights.get(vital, {})
-    if not vw:
-        return 0.0
-    if trend_label == "deteriorating":
-        return vw.get("deteriorating", 0.0)
-    if trend_label == "improving":
-        return vw.get("recovering", 0.0)
-    if trend_label == "stable":
-        if "stable" in vw:
-            return vw["stable"]
-        return sum(vw.values()) / len(vw) if vw else 0.0
-    return 0.0
-
-
-def apply_temporal_nudges(
-    per_vital_scores: Dict[str, float],
-    trends: Dict[str, Dict],
-    concern_weights: Dict[str, Dict[str, float]],
-) -> Tuple[Dict[str, Dict], float]:
-    """Apply per-vital temporal nudges and return adjusted scores + new total.
-
-    The concern weight used depends on the detected trend:
-      deteriorating -> Part 3 "deteriorating" scenario concern
-      improving     -> Part 3 "recovering" scenario concern
-      stable        -> Part 3 "stable" scenario concern
-
-    Nudge formula:
-      concern_pct  = selected concern weight / 15
-      nudge        = trend_factor x concern_pct x current_score
-      adjusted     = clamp(score + nudge, 0, 3)
-
-    When the current score is 0 but the vital is deteriorating, a small floor
-    (0.1) is used so the nudge can still inject a non-zero warning.
-    """
-    results: Dict[str, Dict] = {}
-    adjusted_total = 0.0
-
-    for vital, score in per_vital_scores.items():
-        if vital == "total":
-            continue
-        trend_info = trends.get(vital, {})
-        trend_factor = trend_info.get("trend_factor", 0.0)
-        trend_label = trend_info.get("trend", "insufficient_data")
-
-        concern = _select_concern(vital, trend_label, concern_weights)
-        concern_pct = concern / PART3_MAX_CONCERN
-
-        effective_score = max(score, 0.1) if trend_factor > 0 and score == 0.0 else score
-        nudge = trend_factor * concern_pct * effective_score
-        adjusted = max(0.0, min(3.0, score + nudge))
-        adjusted_total += adjusted
-
-        results[vital] = {
-            "original_score": round(score, 3),
-            "nudge": round(nudge, 3),
-            "adjusted_score": round(adjusted, 3),
-            "nudge_pct": round((nudge / score * 100) if score > 0 else 0.0, 1),
-            "concern_weight": round(concern, 2),
-            "concern_pct": round(concern_pct * 100, 1),
-            "trend": trend_label,
-            "trend_factor": round(trend_factor, 4),
-        }
-
-    return results, round(adjusted_total, 2)
-
-
 def _render_temporal_tab(prefix: str) -> None:
-    """Collect multiple observations over time and compute per-vital temporal nudges."""
+    """Two-step temporal adjustment: EWMA smoothing + worsening-trend factor."""
     st.caption(
-        "Add sequential observations at chosen intervals. Per-vital trends are "
-        "computed over a configurable window with EWMA smoothing, and each vital's "
-        "fuzzy score is nudged based on trend direction and Part 3 clinician concern weights."
+        "Add sequential observations to build a timeline. Each vital's concern "
+        "score (0\u20133) is smoothed with an exponentially weighted moving average "
+        "(EWMA), then adjusted upward if the *raw* concern score shows a worsening "
+        "trend over the look-back window. Improving or stable trends produce no "
+        "adjustment. Inspired oxygen is included using the same two-step method."
     )
 
     selected_dir = DATA_DIR_SIGMOID
@@ -1624,7 +1420,6 @@ def _render_temporal_tab(prefix: str) -> None:
         st.error(f"Required sigmoid membership set not found at {selected_dir}.")
         return
     aggregation_method = "additive"
-    st.caption("Configuration fixed: Generated sigmoid membership functions + additive aggregation.")
 
     presets = {
         "Normal": Observation(hr=80, bp=120, temp=36.8, resp=16, ox_sats=98, insp_ox=21),
@@ -1637,33 +1432,91 @@ def _render_temporal_tab(prefix: str) -> None:
     if timeline_key not in st.session_state:
         st.session_state[timeline_key] = []
 
+    # ------------------------------------------------------------------
+    # Temporal parameters
+    # ------------------------------------------------------------------
+    st.subheader("Temporal parameters")
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        cfg_alpha = st.slider(
+            "\u03b1 (EWMA smoothing)",
+            min_value=0.05, max_value=1.0, value=0.7, step=0.05,
+            key=f"{prefix}_cfg_alpha",
+            help=(
+                "Weight given to the most recent observation in the EWMA. "
+                "Higher \u03b1 = more responsive to recent values; lower \u03b1 = longer memory."
+            ),
+        )
+    with p2:
+        cfg_beta = st.slider(
+            "\u03b2 (trend strength)",
+            min_value=0.1, max_value=10.0, value=2.0, step=0.1,
+            key=f"{prefix}_cfg_beta",
+            help=(
+                "Controls how strongly a worsening trend in raw concern scores "
+                "pushes the adjusted score upward via the sigmoid. "
+                "Higher \u03b2 = stronger response to even small positive trends."
+            ),
+        )
+    with p3:
+        cfg_window = st.number_input(
+            "Look-back window (hours)",
+            min_value=1.0, max_value=72.0, value=24.0, step=1.0,
+            key=f"{prefix}_cfg_window",
+            help="The trend slope is computed over raw concern scores within this window.",
+        )
+    t_config = TemporalConfig(
+        ewma_alpha=cfg_alpha,
+        trend_beta=cfg_beta,
+        window_hours=cfg_window,
+    )
+
+    # ------------------------------------------------------------------
+    # Method explanation
+    # ------------------------------------------------------------------
+    with st.expander("How the two-step temporal adjustment works", expanded=False):
+        st.markdown(
+            "**Step 1 \u2014 EWMA smoothing**\n\n"
+            "The exponentially weighted moving average of each vital\u2019s concern "
+            "score (0\u20133) captures the \u201cmemory\u201d of the vital sign, including any "
+            "recent instability or values that were worse than the current one.\n\n"
+            r"$$\text{EWMA}_t = \alpha \cdot x_t + (1 - \alpha) \cdot \text{EWMA}_{t-1}$$"
+            "\n\n"
+            "**Step 2 \u2014 Worsening-trend factor**\n\n"
+            "A linear trend (slope *s*) is fitted to the **raw** concern scores "
+            "(not the EWMA scores) over the look-back window. If *s* > 0 (worsening), "
+            "a sigmoid transformation produces a trend factor *f* in (0, 1):\n\n"
+            r"$$f = \frac{2}{1 + e^{-\beta \cdot s}} - 1 \quad \text{(only when } s > 0\text{)}$$"
+            "\n\n"
+            "The adjusted score is then:\n\n"
+            r"$$\text{adjusted} = \text{EWMA} + f \times (3 - \text{EWMA})$$"
+            "\n\n"
+            "This guarantees the result stays in [0, 3]. Improving or stable trends "
+            "(slope \u2264 0) produce no adjustment \u2014 the EWMA value is used as-is."
+        )
+
+    # ------------------------------------------------------------------
+    # Add observation
+    # ------------------------------------------------------------------
     st.subheader("Add observation")
     col_cfg1, col_cfg2 = st.columns(2)
     with col_cfg1:
         interval_unit = st.selectbox(
-            "Interval unit",
-            ["minutes", "hours"],
-            index=1,
+            "Interval unit", ["minutes", "hours"], index=1,
             key=f"{prefix}_unit",
         )
     with col_cfg2:
         interval_value = st.number_input(
-            "Interval size",
-            min_value=1,
-            max_value=240,
-            value=1,
+            "Interval size", min_value=1, max_value=240, value=1,
             key=f"{prefix}_interval",
         )
 
     preset_name = st.radio(
-        "Quick examples",
-        list(presets.keys()),
-        horizontal=True,
+        "Quick examples", list(presets.keys()), horizontal=True,
         key=f"{prefix}_preset",
     )
     default_obs = presets[preset_name]
 
-    # Keep temporal input widgets in sync when user switches presets.
     hr_key = f"{prefix}_hr"
     bp_key = f"{prefix}_bp"
     temp_key = f"{prefix}_temp"
@@ -1685,52 +1538,32 @@ def _render_temporal_tab(prefix: str) -> None:
         col1, col2, col3 = st.columns(3)
         with col1:
             hr = st.number_input(
-                "Heart rate (bpm)",
-                min_value=30,
-                max_value=200,
-                value=int(st.session_state.get(hr_key, default_obs.hr)),
-                key=hr_key,
+                "Heart rate (bpm)", min_value=30, max_value=200,
+                value=int(st.session_state.get(hr_key, default_obs.hr)), key=hr_key,
             )
             bp = st.number_input(
-                "Systolic BP (mmHg)",
-                min_value=50,
-                max_value=220,
-                value=int(st.session_state.get(bp_key, default_obs.bp)),
-                key=bp_key,
+                "Systolic BP (mmHg)", min_value=50, max_value=220,
+                value=int(st.session_state.get(bp_key, default_obs.bp)), key=bp_key,
             )
         with col2:
             temp = st.number_input(
-                "Temperature (°C)",
-                min_value=30.0,
-                max_value=43.0,
+                "Temperature (\u00b0C)", min_value=30.0, max_value=43.0,
                 value=float(st.session_state.get(temp_key, default_obs.temp)),
-                step=0.1,
-                format="%.1f",
-                key=temp_key,
+                step=0.1, format="%.1f", key=temp_key,
             )
             resp = st.number_input(
-                "Respiratory rate (breaths/min)",
-                min_value=4,
-                max_value=50,
-                value=int(st.session_state.get(resp_key, default_obs.resp)),
-                key=resp_key,
+                "Respiratory rate (breaths/min)", min_value=4, max_value=50,
+                value=int(st.session_state.get(resp_key, default_obs.resp)), key=resp_key,
             )
         with col3:
             ox = st.number_input(
-                "Oxygen saturation (%)",
-                min_value=70,
-                max_value=102,
-                value=int(st.session_state.get(ox_key, default_obs.ox_sats)),
-                key=ox_key,
+                "Oxygen saturation (%)", min_value=70, max_value=102,
+                value=int(st.session_state.get(ox_key, default_obs.ox_sats)), key=ox_key,
             )
             insp = st.number_input(
-                "Inspired oxygen (% FiO2 or approximated)",
-                min_value=21,
-                max_value=100,
-                value=int(st.session_state.get(insp_key, default_obs.insp_ox)),
-                key=insp_key,
+                "Inspired oxygen (% FiO2 or approximated)", min_value=21, max_value=100,
+                value=int(st.session_state.get(insp_key, default_obs.insp_ox)), key=insp_key,
             )
-
         add_clicked = st.form_submit_button("Add observation", use_container_width=True)
 
     if add_clicked:
@@ -1821,155 +1654,140 @@ def _render_temporal_tab(prefix: str) -> None:
                     entry[pv_key] = round(pv_scores.get(vital, 0.0), 3)
 
     # ------------------------------------------------------------------
-    # Temporal trend configuration
+    # Compute two-step temporal adjustments
     # ------------------------------------------------------------------
-    with st.expander("Temporal trend settings", expanded=False):
-        tc1, tc2, tc3, tc4 = st.columns(4)
-        with tc1:
-            cfg_window = st.number_input(
-                "Look-back window (hours)", min_value=1.0, max_value=72.0,
-                value=24.0, step=1.0, key=f"{prefix}_cfg_window",
-            )
-        with tc2:
-            cfg_min_obs = st.number_input(
-                "Min observations for trend", min_value=2, max_value=20,
-                value=3, key=f"{prefix}_cfg_min_obs",
-            )
-        with tc3:
-            cfg_min_gap = st.number_input(
-                "Min gap between obs (min)", min_value=0.0, max_value=120.0,
-                value=30.0, step=5.0, key=f"{prefix}_cfg_min_gap",
-            )
-        with tc4:
-            cfg_alpha = st.slider(
-                "EWMA smoothing α", min_value=0.1, max_value=1.0,
-                value=0.3, step=0.05, key=f"{prefix}_cfg_alpha",
-                help="Higher = more weight on recent observations.",
-            )
-    t_config = TemporalConfig(
-        window_hours=cfg_window,
-        min_observations=cfg_min_obs,
-        min_gap_minutes=cfg_min_gap,
-        ewma_alpha=cfg_alpha,
-    )
+    temporal_results = _compute_temporal_adjusted_scores(timeline, t_config)
 
-    # ------------------------------------------------------------------
-    # Load Part 3 concern weights (per-vital, per-trend-type)
-    # ------------------------------------------------------------------
-    concern_weights = load_part3_concern_weights()
-    if not concern_weights:
-        st.warning(
-            "Part 3 survey data not found - using equal concern weights for all vitals. "
-            f"Expected at: {PART3_SURVEY_PATH}"
-        )
-        default_w = PART3_MAX_CONCERN / 2.0
-        concern_weights = {
-            v: {"stable": default_w, "deteriorating": default_w, "recovering": default_w}
-            for v in _PV_KEYS
-        }
-
-    # ------------------------------------------------------------------
-    # Compute per-vital trends
-    # ------------------------------------------------------------------
-    trends = compute_per_vital_trends(timeline, t_config)
-
-    # Latest per-vital snapshot scores
-    latest_entry = timeline[-1]
-    latest_pv: Dict[str, float] = {}
-    for vital, pv_key in _PV_KEYS.items():
-        latest_pv[vital] = float(latest_entry.get(pv_key, 0.0))
-
-    # ------------------------------------------------------------------
-    # Apply nudges
-    # ------------------------------------------------------------------
-    nudge_results, adjusted_total = apply_temporal_nudges(
-        latest_pv, trends, concern_weights,
-    )
+    snapshot_total = float(timeline[-1].get("snapshot_fuzzy_ews", 0.0))
+    ewma_total = sum(r["ewma_current"] for r in temporal_results.values())
+    adjusted_total = sum(r["adjusted_score"] for r in temporal_results.values())
 
     # ------------------------------------------------------------------
     # Headline metrics
     # ------------------------------------------------------------------
-    raw_total = float(latest_entry.get("snapshot_fuzzy_ews", 0.0))
     st.subheader("Temporal-adjusted scores")
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     with m1:
         st.metric(
-            "Snapshot Fuzzy EWS (0-18)",
-            f"{raw_total:.2f}",
-            help="Sum of per-vital fuzzy scores at the latest observation (no temporal adjustment).",
+            "Snapshot total (0\u201318)",
+            f"{snapshot_total:.2f}",
+            help="Sum of per-vital concern scores at the latest observation (no temporal adjustment).",
         )
     with m2:
         st.metric(
-            "Trend-adjusted Fuzzy EWS (0-18)",
-            f"{min(adjusted_total, 18.0):.2f}",
-            delta=f"{adjusted_total - raw_total:+.2f}",
-            help="Per-vital scores nudged by trend direction and Part 3 clinician concern weights, then summed.",
+            "EWMA total (0\u201318)",
+            f"{ewma_total:.2f}",
+            delta=f"{ewma_total - snapshot_total:+.2f}",
+            help="Sum of EWMA-smoothed per-vital scores (Step 1: memory of recent history).",
         )
     with m3:
-        st.metric("Risk bucket (adjusted)", risk_bucket(min(adjusted_total, 18.0)))
-
-    # ------------------------------------------------------------------
-    # Per-vital nudge detail table
-    # ------------------------------------------------------------------
-    st.subheader("Per-vital trend nudges")
-    st.caption(
-        "Each vital's 0-3 fuzzy score is shifted by: trend_factor × (Part 3 concern / 15) × score. "
-        "Trend computed over the look-back window using EWMA-smoothed scores and linear regression."
-    )
-    nudge_rows = []
-    trend_symbols = {
-        "deteriorating": "▲ Deteriorating",
-        "stable": "— Stable",
-        "improving": "▼ Improving",
-        "insufficient_data": "⋯ Insufficient data",
-    }
-    for vital in _PV_KEYS:
-        info = nudge_results.get(vital, {})
-        t_info = trends.get(vital, {})
-        nudge_rows.append({
-            "Vital": vital.title(),
-            "Score (0-3)": info.get("original_score", 0.0),
-            "Trend": trend_symbols.get(info.get("trend", ""), "?"),
-            "Trend factor": info.get("trend_factor", 0.0),
-            "Concern wt": info.get("concern_weight", 0.0),
-            "Concern %": info.get("concern_pct", 0.0),
-            "Nudge": info.get("nudge", 0.0),
-            "Nudge %": info.get("nudge_pct", 0.0),
-            "Adjusted (0-3)": info.get("adjusted_score", 0.0),
-            "Obs used": t_info.get("n_valid", 0),
-        })
-    st.dataframe(pd.DataFrame(nudge_rows), use_container_width=True, hide_index=True)
-
-    # ------------------------------------------------------------------
-    # Part 3 concern weights reference (per-vital, per-trend-type)
-    # ------------------------------------------------------------------
-    with st.expander("Part 3 concern weights (survey-derived)", expanded=False):
-        cw_rows = []
-        for v, trend_dict in concern_weights.items():
-            row: dict = {"Vital": v.title()}
-            for tt in ("stable", "deteriorating", "recovering"):
-                val = trend_dict.get(tt)
-                row[tt.title()] = f"{val:.2f}" if val is not None else "-"
-            cw_rows.append(row)
-        st.dataframe(pd.DataFrame(cw_rows), use_container_width=True, hide_index=True)
-        st.caption(
-            "Scenario-to-vital mapping: "
-            + ", ".join(
-                f"{v.title()}: {', '.join(f'{t}=Sc{sid}' for t, sid in ids.items())}"
-                for v, ids in PART3_VITAL_SCENARIOS.items()
-            )
+        adj_display = min(adjusted_total, 18.0)
+        st.metric(
+            "Trend-adjusted total (0\u201318)",
+            f"{adj_display:.2f}",
+            delta=f"{adjusted_total - ewma_total:+.2f}",
+            help="EWMA scores adjusted upward for worsening trends (Step 2: trend factor).",
         )
+    with m4:
+        st.metric("Risk bucket", risk_bucket(adj_display))
 
     # ------------------------------------------------------------------
-    # Temporal snapshots table (compact)
+    # Per-vital detail table
+    # ------------------------------------------------------------------
+    st.subheader("Per-vital temporal detail")
+    st.caption(
+        "Step 1: EWMA captures memory of past concern scores. "
+        "Step 2: positive raw-score trends push the adjusted score upward via a sigmoid."
+    )
+    detail_rows = []
+    for vital in _PV_KEYS:
+        r = temporal_results.get(vital, {})
+        raw_latest = r["raw_scores"][-1] if r.get("raw_scores") else 0.0
+        slope = r.get("trend_slope", 0.0)
+        trend_factor = r.get("trend_factor", 0.0)
+        if slope > 0:
+            trend_label = "\u25b2 Worsening"
+        elif slope < 0:
+            trend_label = "\u25bc Improving"
+        else:
+            trend_label = "\u2014 Stable"
+        detail_rows.append({
+            "Vital": vital.title(),
+            "Latest raw (0\u20133)": round(raw_latest, 2),
+            "EWMA (0\u20133)": r.get("ewma_current", 0.0),
+            "Trend slope (/hr)": round(slope, 4),
+            "Trend direction": trend_label,
+            "Trend factor f": round(trend_factor, 4),
+            "Adjusted (0\u20133)": r.get("adjusted_score", 0.0),
+            "Obs (total)": r.get("n_obs", 0),
+            "Obs (window)": r.get("n_trend_obs", 0),
+        })
+    st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
+    # ------------------------------------------------------------------
+    # EWMA trend visualisation
+    # ------------------------------------------------------------------
+    if len(timeline) >= 2:
+        st.subheader("EWMA trend visualisation")
+        chart_records: list[dict] = []
+        for vital in _PV_KEYS:
+            r = temporal_results.get(vital, {})
+            raw_scores = r.get("raw_scores", [])
+            ewma_scores = r.get("ewma_scores", [])
+            for i, entry in enumerate(timeline):
+                t_h = float(entry["t_minutes"]) / 60.0
+                if i < len(raw_scores):
+                    chart_records.append({
+                        "Time (hours)": round(t_h, 2),
+                        "Vital": vital.title(),
+                        "Series": "Raw concern",
+                        "Score": raw_scores[i],
+                    })
+                if i < len(ewma_scores):
+                    chart_records.append({
+                        "Time (hours)": round(t_h, 2),
+                        "Vital": vital.title(),
+                        "Series": "EWMA",
+                        "Score": ewma_scores[i],
+                    })
+
+        if chart_records:
+            chart_df = pd.DataFrame(chart_records)
+            vital_options = [v.title() for v in _PV_KEYS]
+            vital_selector = alt.selection_point(
+                fields=["Vital"],
+                bind=alt.binding_select(options=vital_options, name="Vital: "),
+                value=vital_options[0],
+            )
+            ewma_chart = (
+                alt.Chart(chart_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("Time (hours):Q"),
+                    y=alt.Y("Score:Q", scale=alt.Scale(domain=[0, 3]),
+                            title="Concern score (0\u20133)"),
+                    color=alt.Color("Series:N"),
+                    strokeDash=alt.StrokeDash("Series:N"),
+                    tooltip=["Vital:N", "Series:N", "Time (hours):Q", "Score:Q"],
+                )
+                .add_params(vital_selector)
+                .transform_filter(vital_selector)
+                .properties(height=300)
+            )
+            st.altair_chart(ewma_chart, use_container_width=True)
+
+    # ------------------------------------------------------------------
+    # Timeline snapshots table
     # ------------------------------------------------------------------
     df = pd.DataFrame(timeline)
     df = df.sort_values("idx").reset_index(drop=True)
 
     pv_display_cols = list(_PV_KEYS.values())
-    base_cols = ["idx", "t_minutes", "heart_rate", "blood_pressure", "temperature",
-                 "respiratory_rate", "oxygen_saturation", "inspired_oxygen",
-                 "snapshot_fuzzy_ews", "snapshot_news2"]
+    base_cols = [
+        "idx", "t_minutes", "heart_rate", "blood_pressure", "temperature",
+        "respiratory_rate", "oxygen_saturation", "inspired_oxygen",
+        "snapshot_fuzzy_ews", "snapshot_news2",
+    ]
     available_cols = [c for c in base_cols + pv_display_cols if c in df.columns]
     compact_df = df[available_cols].copy()
     compact_df = compact_df.rename(columns={
@@ -1983,52 +1801,8 @@ def _render_temporal_tab(prefix: str) -> None:
         "pv_oxygen_saturation": "PV SpO2", "pv_inspired_oxygen": "PV FiO2",
     })
 
-    st.subheader("Temporal snapshots")
+    st.subheader("Timeline snapshots")
     st.dataframe(compact_df, use_container_width=True, hide_index=True)
-
-    # ------------------------------------------------------------------
-    # Legacy 5-rule overall delta adjustment (kept for comparison)
-    # ------------------------------------------------------------------
-    df["snapshot_delta"] = df["snapshot_fuzzy_ews"].astype(float).diff()
-    df["temporal_adjustment"] = df["snapshot_delta"].apply(
-        lambda d: _temporal_fuzzy_adjustment(d) if pd.notna(d) else 0.0
-    )
-
-    trend_summary = df[
-        [c for c in [
-            "idx", "t_minutes", "heart_rate", "blood_pressure", "temperature",
-            "respiratory_rate", "oxygen_saturation", "inspired_oxygen",
-            "snapshot_fuzzy_ews", "snapshot_news2", "snapshot_delta", "temporal_adjustment",
-        ] if c in df.columns]
-    ].copy()
-    trend_summary = trend_summary.sort_values("idx").reset_index(drop=True)
-    trend_summary["delta_news2"] = trend_summary["snapshot_news2"].diff()
-    trend_summary["dt_minutes"] = trend_summary["t_minutes"].diff()
-    trend_summary["fuzzy_rate_per_hour"] = trend_summary["snapshot_delta"] / (trend_summary["dt_minutes"] / 60.0)
-    trend_summary = trend_summary.rename(columns={
-        "idx": "Obs #", "t_minutes": "Time (min)",
-        "heart_rate": "HR", "blood_pressure": "BP", "temperature": "Temp",
-        "respiratory_rate": "Resp", "oxygen_saturation": "SpO2",
-        "inspired_oxygen": "FiO2",
-        "snapshot_fuzzy_ews": "Snapshot Fuzzy EWS", "snapshot_news2": "Snapshot NEWS-2",
-        "snapshot_delta": "Score Δ", "temporal_adjustment": "Legacy adj.",
-        "delta_news2": "ΔNEWS-2", "fuzzy_rate_per_hour": "Fuzzy EWS Δ/hour",
-    })
-    for col in ["Temp", "Snapshot Fuzzy EWS", "Score Δ", "Legacy adj.", "Fuzzy EWS Δ/hour"]:
-        if col in trend_summary.columns:
-            trend_summary[col] = pd.to_numeric(trend_summary[col], errors="coerce").round(2)
-
-    with st.expander("Trend summary (legacy 5-rule delta system)", expanded=False):
-        st.caption(
-            "Score Δ = change in total Fuzzy EWS between consecutive snapshots. "
-            "Legacy adj. = output of the original 5-rule fuzzy system applied to that delta."
-        )
-        display_cols = [c for c in [
-            "Obs #", "Time (min)", "HR", "BP", "Temp", "Resp", "SpO2", "FiO2",
-            "Snapshot Fuzzy EWS", "Snapshot NEWS-2", "Score Δ", "Legacy adj.",
-            "ΔNEWS-2", "Fuzzy EWS Δ/hour",
-        ] if c in trend_summary.columns]
-        st.dataframe(trend_summary[display_cols], use_container_width=True, hide_index=True)
 
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     st.download_button(
