@@ -356,6 +356,7 @@ def defuzz_vital_centroid(concern_levels: Dict[str, float]) -> float:
 
 
 def calculate_fuzzy_ews_additive(all_firings: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    """Pure additive aggregation (no gamma mixing)."""
     per_vital_scores: Dict[str, float] = {}
     total = 0.0
     for vital_name, vital_memberships in all_firings.items():
@@ -367,10 +368,16 @@ def calculate_fuzzy_ews_additive(all_firings: Dict[str, Dict[str, float]]) -> Di
     return per_vital_scores
 
 
-def aggregate_total(scores: Dict[str, float], method: str, power: float = 2.0) -> float:
+def aggregate_total(
+    scores: Dict[str, float],
+    method: str,
+    power: float = 2.0,
+    gamma: float = 1.0,
+) -> float:
     per_vital = [v for k, v in scores.items() if k != "total"]
     if not per_vital:
         return 0.0
+
     max_per_vital = 3.0
     n = float(len(per_vital))
     normalized = [min(max(v / max_per_vital, 0.0), 1.0) for v in per_vital]
@@ -379,22 +386,37 @@ def aggregate_total(scores: Dict[str, float], method: str, power: float = 2.0) -
         product = 1.0
         for val in normalized:
             product *= (1.0 - val)
-        return (1.0 - product) * max_per_vital * n
-
-    if method == "nonlinear":
+        base_total = (1.0 - product) * max_per_vital * n
+    elif method == "nonlinear":
         avg_power = sum(val ** power for val in normalized) / n
-        return (avg_power ** (1.0 / power)) * max_per_vital * n
+        base_total = (avg_power ** (1.0 / power)) * max_per_vital * n
+    else:
+        base_total = sum(per_vital)
 
-    return sum(per_vital)
+    # Gamma controls how much a single extremely abnormal vital sign can dominate.
+    # gamma = 1.0 -> original aggregation (approximately additive).
+    # gamma = 0.0 -> total driven purely by the worst vital, scaled to the same range.
+    gamma_clamped = max(0.0, min(1.0, float(gamma)))
+    if gamma_clamped == 1.0:
+        return base_total
+
+    max_vital = max(per_vital)
+    # Scale worst per-vital score (0-3) to the same 0-(3*n) range as base_total.
+    max_based_total = max_vital * n
+    return (1.0 - gamma_clamped) * max_based_total + gamma_clamped * base_total
 
 
-def calculate_fuzzy_ews(all_firings: Dict[str, Dict[str, float]], method: str) -> Dict[str, float]:
+def calculate_fuzzy_ews(
+    all_firings: Dict[str, Dict[str, float]],
+    method: str,
+    gamma: float = 1.0,
+) -> Dict[str, float]:
     per_vital_scores: Dict[str, float] = {}
     for vital_name, vital_memberships in all_firings.items():
         concern_levels = map_to_concern_levels(vital_memberships)
         score = defuzz_vital_centroid(concern_levels)
         per_vital_scores[vital_name] = score
-    per_vital_scores["total"] = aggregate_total(per_vital_scores, method)
+    per_vital_scores["total"] = aggregate_total(per_vital_scores, method, power=2.0, gamma=gamma)
     return per_vital_scores
 
 
@@ -874,7 +896,9 @@ def it2_defuzz_vital_centroid(
 
 
 def calculate_it2_fuzzy_ews(
-    all_firings: Dict[str, Dict[str, Tuple[float, float]]], method: str,
+    all_firings: Dict[str, Dict[str, Tuple[float, float]]],
+    method: str,
+    gamma: float = 1.0,
 ) -> Tuple[Dict[str, float], Dict[str, Tuple[float, float]]]:
     """IT2FLS scoring with per-vital type-reduction intervals."""
     per_vital_scores: Dict[str, float] = {}
@@ -884,7 +908,7 @@ def calculate_it2_fuzzy_ews(
         y_l, y_r, score = it2_defuzz_vital_centroid(concern_intervals)
         per_vital_scores[vital_name] = score
         per_vital_intervals[vital_name] = (y_l, y_r)
-    per_vital_scores["total"] = aggregate_total(per_vital_scores, method)
+    per_vital_scores["total"] = aggregate_total(per_vital_scores, method, power=2.0, gamma=gamma)
     return per_vital_scores, per_vital_intervals
 
 
@@ -1007,6 +1031,20 @@ def _render_t1_tab(prefix: str) -> None:
     aggregation_method = "additive"
     st.caption("Configuration fixed: Generated sigmoid membership functions + additive aggregation.")
 
+    gamma = st.slider(
+        "\u03b3 (single-vital dominance)",
+        min_value=0.0,
+        max_value=1.0,
+        value=1.0,
+        step=0.05,
+        key=f"{prefix}_gamma",
+        help=(
+            "Controls how much a single extremely abnormal vital can dominate the total score. "
+            "\u03b3 = 1.0 \u2192 approximately additive (current behaviour); "
+            "\u03b3 = 0.0 \u2192 total driven purely by the worst vital (no additivity)."
+        ),
+    )
+
     use_part2_rules = st.checkbox(
         "Use clinician survey rules (Part 2)",
         value=False,
@@ -1054,7 +1092,7 @@ def _render_t1_tab(prefix: str) -> None:
             st.info("Inputs were clamped to the membership function range used in the model.")
 
         all_firings = firings(obs.hr, obs.bp, obs.temp, obs.resp, obs.ox_sats, obs.insp_ox, selected_dir)
-        scores = calculate_fuzzy_ews(all_firings, aggregation_method)
+        scores = calculate_fuzzy_ews(all_firings, aggregation_method, gamma=gamma)
         total = scores.pop("total", 0.0)
         news_scores, news_total = calculate_news2(obs)
 
@@ -1365,7 +1403,11 @@ def _compute_temporal_adjusted_scores(
 
         # Step 1: EWMA of concern scores over the full timeline
         ewma_scores = _ewma(raw_scores, config.ewma_alpha)
-        ewma_current = ewma_scores[-1]
+        # Ensure the temporally smoothed score never falls below the latest snapshot
+        # so temporal context can only maintain or increase concern relative to
+        # the current raw value, not reduce it.
+        latest_raw = raw_scores[-1]
+        ewma_current = max(ewma_scores[-1], latest_raw)
 
         # Step 2: linear trend in RAW concern scores within the look-back window
         window_raw: list[float] = []
