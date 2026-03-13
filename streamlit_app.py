@@ -401,8 +401,10 @@ def aggregate_total(
         return base_total
 
     max_vital = max(per_vital)
-    # Scale worst per-vital score (0-3) to the same 0-(3*n) range as base_total.
-    max_based_total = max_vital * n
+    # Scale worst per-vital score (0-3) into the global 0-18 range, independent
+    # of how many vitals are present, so at gamma = 0 a single vital near 3/3
+    # can in principle drive the overall total toward 18 with no additivity.
+    max_based_total = (18.0 / max_per_vital) * max_vital
     return (1.0 - gamma_clamped) * max_based_total + gamma_clamped * base_total
 
 
@@ -1031,20 +1033,6 @@ def _render_t1_tab(prefix: str) -> None:
     aggregation_method = "additive"
     st.caption("Configuration fixed: Generated sigmoid membership functions + additive aggregation.")
 
-    gamma = st.slider(
-        "\u03b3 (single-vital dominance)",
-        min_value=0.0,
-        max_value=1.0,
-        value=1.0,
-        step=0.05,
-        key=f"{prefix}_gamma",
-        help=(
-            "Controls how much a single extremely abnormal vital can dominate the total score. "
-            "\u03b3 = 1.0 \u2192 approximately additive (current behaviour); "
-            "\u03b3 = 0.0 \u2192 total driven purely by the worst vital (no additivity)."
-        ),
-    )
-
     use_part2_rules = st.checkbox(
         "Use clinician survey rules (Part 2)",
         value=False,
@@ -1092,7 +1080,7 @@ def _render_t1_tab(prefix: str) -> None:
             st.info("Inputs were clamped to the membership function range used in the model.")
 
         all_firings = firings(obs.hr, obs.bp, obs.temp, obs.resp, obs.ox_sats, obs.insp_ox, selected_dir)
-        scores = calculate_fuzzy_ews(all_firings, aggregation_method, gamma=gamma)
+        scores = calculate_fuzzy_ews(all_firings, aggregation_method)
         total = scores.pop("total", 0.0)
         news_scores, news_total = calculate_news2(obs)
 
@@ -1478,7 +1466,7 @@ def _render_temporal_tab(prefix: str) -> None:
     # Temporal parameters
     # ------------------------------------------------------------------
     st.subheader("Temporal parameters")
-    p1, p2, p3 = st.columns(3)
+    p1, p2, p3, p4 = st.columns(4)
     with p1:
         cfg_alpha = st.slider(
             "\u03b1 (EWMA smoothing)",
@@ -1507,6 +1495,20 @@ def _render_temporal_tab(prefix: str) -> None:
             key=f"{prefix}_cfg_window",
             help="The trend slope is computed over raw concern scores within this window.",
         )
+    with p4:
+        cfg_gamma = st.slider(
+            "\u03b3 (single-vital dominance)",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.05,
+            key=f"{prefix}_cfg_gamma",
+            help=(
+                "Controls how much a single extremely abnormal vital can dominate the total fuzzy total. "
+                "\u03b3 = 1.0 \u2192 approximately additive (original behaviour); "
+                "\u03b3 = 0.0 \u2192 total driven purely by the worst vital (no additivity)."
+            ),
+        )
     t_config = TemporalConfig(
         ewma_alpha=cfg_alpha,
         trend_beta=cfg_beta,
@@ -1530,11 +1532,21 @@ def _render_temporal_tab(prefix: str) -> None:
             "a sigmoid transformation produces a trend factor *f* in (0, 1):\n\n"
             r"$$f = \frac{2}{1 + e^{-\beta \cdot s}} - 1 \quad \text{(only when } s > 0\text{)}$$"
             "\n\n"
-            "The adjusted score is then:\n\n"
-            r"$$\text{adjusted} = \text{EWMA} + f \times (3 - \text{EWMA})$$"
+            "The adjusted per-vital score is then:\n\n"
+            r"$$\text{adjusted} = \max(\text{EWMA}, x_{\text{latest}}) + f \times (3 - \max(\text{EWMA}, x_{\text{latest}}))$$"
             "\n\n"
-            "This guarantees the result stays in [0, 3]. Improving or stable trends "
-            "(slope \u2264 0) produce no adjustment \u2014 the EWMA value is used as-is."
+            "This guarantees the result stays in [0, 3] and never falls below the latest snapshot."
+            " Improving or stable trends (slope \u2264 0) produce no adjustment \u2014 the clamped EWMA "
+            "value is used as-is.\n\n"
+            "**Gamma (\u03b3) \u2014 single-vital dominance in totals**\n\n"
+            "When totals are formed from per-vital scores in the temporal builder, gamma controls how "
+            "much a single extremely abnormal vital can dominate the overall fuzzy total:\n\n"
+            r"$$\text{total} = (1 - \gamma) \cdot \text{max\_vital\_based} + \gamma \cdot \text{additive\_total}$$"
+            "\n\n"
+            "Here, *additive_total* is the approximately additive sum across vitals, and "
+            "*max_vital_based* scales the worst per-vital score so that one vital at 3/3 can, in "
+            "principle, reach the maximum overall score. \u03b3 = 1.0 recovers the original additive "
+            "behaviour, while \u03b3 = 0.0 makes the total driven purely by the worst single vital."
         )
 
     # ------------------------------------------------------------------
@@ -1615,7 +1627,7 @@ def _render_temporal_tab(prefix: str) -> None:
             clamped.hr, clamped.bp, clamped.temp, clamped.resp,
             clamped.ox_sats, clamped.insp_ox, selected_dir,
         )
-        pv_scores = calculate_fuzzy_ews(all_f, aggregation_method)
+        pv_scores = calculate_fuzzy_ews(all_f, aggregation_method, gamma=cfg_gamma)
         fuzzy_total = float(pv_scores.pop("total", 0.0))
         _, news_total = calculate_news2(raw_obs)
 
@@ -1685,7 +1697,7 @@ def _render_temporal_tab(prefix: str) -> None:
             obs_model.hr, obs_model.bp, obs_model.temp, obs_model.resp,
             obs_model.ox_sats, obs_model.insp_ox, selected_dir,
         )
-        pv_scores = calculate_fuzzy_ews(all_f, aggregation_method)
+        pv_scores = calculate_fuzzy_ews(all_f, aggregation_method, gamma=cfg_gamma)
         if needs_snap:
             entry["snapshot_fuzzy_ews"] = round(float(pv_scores.get("total", 0.0)), 2)
             _, news_total = calculate_news2(obs_raw)
@@ -1701,8 +1713,15 @@ def _render_temporal_tab(prefix: str) -> None:
     temporal_results = _compute_temporal_adjusted_scores(timeline, t_config)
 
     snapshot_total = float(timeline[-1].get("snapshot_fuzzy_ews", 0.0))
-    ewma_total = sum(r["ewma_current"] for r in temporal_results.values())
-    adjusted_total = sum(r["adjusted_score"] for r in temporal_results.values())
+
+    # Aggregate EWMA and trend-adjusted per-vital scores using the same gamma rule
+    # used for snapshot totals, so a single extremely abnormal (and worsening)
+    # vital can, in principle, drive the overall temporal concern score toward 18
+    # when gamma is near 0, while gamma near 1.0 recovers approximately additive behaviour.
+    ewma_per_vital = {vital: r.get("ewma_current", 0.0) for vital, r in temporal_results.items()}
+    adjusted_per_vital = {vital: r.get("adjusted_score", 0.0) for vital, r in temporal_results.items()}
+    ewma_total = aggregate_total(ewma_per_vital, method="additive", power=2.0, gamma=cfg_gamma)
+    adjusted_total = aggregate_total(adjusted_per_vital, method="additive", power=2.0, gamma=cfg_gamma)
 
     # ------------------------------------------------------------------
     # Headline metrics
