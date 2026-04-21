@@ -1,0 +1,4 @@
+model_a,model_b,spearman_rho,kendall_tau
+NEWS-2,Snapshot Fuzzy EWS,0.7776183666680467,0.624134147279233
+NEWS-2,Temporal Builder,0.744347105582466,0.5922290541423125
+Snapshot Fuzzy EWS,Temporal Builder,0.9557403249740963,0.8297301023221945
