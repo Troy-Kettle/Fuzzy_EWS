@@ -153,6 +153,76 @@ class custom_mf_3_var_down:
         return out
 
 
+class custom_mf_sbp_sharper:
+    """Asymmetric systolic BP input MF.
+
+    Reads the standard 7-set SBP CSV but exposes a 6-set interface where the
+    ``Above normal - mild concern`` and ``Above normal - moderate concern``
+    sigmoids are summed (and clipped to 1.0) into a single ``Above normal -
+    elevated`` set. Partition of unity is preserved because the merged set
+    is just the sum of two neighbouring sets.
+
+    The companion mapping ``LABEL_TO_CONCERN`` then sends:
+
+        Above normal - elevated        -> Mild concern
+        Above normal - severe concern  -> Severe concern
+
+    Hypotension still maps one-to-one (below severe -> Severe, etc.), so the
+    Moderate concern output bucket is simply never activated from the above
+    side. This encodes the clinical prior that mild and moderate hypertension
+    are qualitatively similar low-urgency states, while a hypertensive crisis
+    is a distinct high-urgency state.
+    """
+
+    LABEL_TO_CONCERN = {
+        "Below normal - severe concern": "Severe concern",
+        "Below normal - moderate concern": "Moderate concern",
+        "Below normal - mild concern": "Mild concern",
+        "No concern": "No concern",
+        "Above normal - elevated": "Mild concern",
+        "Above normal - severe concern": "Severe concern",
+    }
+
+    def __init__(self, path: Path):
+        self.df = pd.read_csv(path)
+        keys = self.df.loc[:, "Value"].values
+        self.B_SevC = dict(zip(keys, self.df.loc[:, "Below normal - severe concern"].values))
+        self.B_ModC = dict(zip(keys, self.df.loc[:, "Below normal - moderate concern"].values))
+        self.B_MildC = dict(zip(keys, self.df.loc[:, "Below normal - mild concern"].values))
+        self.no_con = dict(zip(keys, self.df.loc[:, "No concern"].values))
+        a_mild = self.df.loc[:, "Above normal - mild concern"].values
+        a_mod = self.df.loc[:, "Above normal - moderate concern"].values
+        elevated = [min(1.0, max(0.0, float(m) + float(md))) for m, md in zip(a_mild, a_mod)]
+        self.A_Elev = dict(zip(keys, elevated))
+        self.A_SevC = dict(zip(keys, self.df.loc[:, "Above normal - severe concern"].values))
+        self.fs = [
+            self.B_SevC, self.B_ModC, self.B_MildC, self.no_con,
+            self.A_Elev, self.A_SevC,
+        ]
+        self.labels = list(self.LABEL_TO_CONCERN.keys())
+
+    def __call__(self, inp: float) -> Dict[str, float]:
+        return {label: _interp_lookup(fs, inp) for label, fs in zip(self.labels, self.fs)}
+
+    def chart_df(self) -> pd.DataFrame:
+        df = self.df[[
+            "Value",
+            "Below normal - severe concern",
+            "Below normal - moderate concern",
+            "Below normal - mild concern",
+            "No concern",
+        ]].copy()
+        df["Above normal - elevated"] = [
+            min(1.0, max(0.0, float(m) + float(md)))
+            for m, md in zip(
+                self.df["Above normal - mild concern"].values,
+                self.df["Above normal - moderate concern"].values,
+            )
+        ]
+        df["Above normal - severe concern"] = self.df["Above normal - severe concern"].values
+        return df
+
+
 @lru_cache(maxsize=1)
 def load_part2_survey_means() -> Dict[int, float]:
     """Return mean clinician rating per combination from part2 survey data."""
@@ -288,6 +358,16 @@ def load_membership_functions(base_dir: Path) -> Tuple[
     return _load_membership_functions_from(str(base_dir.resolve()))
 
 
+@lru_cache(maxsize=2)
+def _load_sharper_sbp_from(dir_str: str) -> custom_mf_sbp_sharper:
+    base = Path(dir_str)
+    return custom_mf_sbp_sharper(base / "systolic_blood_pressure_membership_functions.csv")
+
+
+def load_sharper_sbp(base_dir: Path) -> custom_mf_sbp_sharper:
+    return _load_sharper_sbp_from(str(base_dir.resolve()))
+
+
 @st.cache_resource(show_spinner=False)
 def output_cache() -> Tuple[OutputMF, Dict[float, Dict[str, float]]]:
     output = OutputMF()
@@ -416,6 +496,67 @@ def calculate_fuzzy_ews(
     per_vital_scores: Dict[str, float] = {}
     for vital_name, vital_memberships in all_firings.items():
         concern_levels = map_to_concern_levels(vital_memberships)
+        score = defuzz_vital_centroid(concern_levels)
+        per_vital_scores[vital_name] = score
+    per_vital_scores["total"] = aggregate_total(per_vital_scores, method, power=2.0, gamma=gamma)
+    return per_vital_scores
+
+
+def map_to_concern_levels_sharper_sbp(
+    vital_memberships: Dict[str, float],
+) -> Dict[str, float]:
+    """Label-driven mapping used only for SBP in the asymmetric variant.
+
+    Uses ``custom_mf_sbp_sharper.LABEL_TO_CONCERN`` when the label is known,
+    and falls back to the standard keyword-based mapping otherwise so this
+    function is safe to call on any vital.
+    """
+    mapping = {"No concern": 0.0, "Mild concern": 0.0, "Moderate concern": 0.0, "Severe concern": 0.0}
+    for key, value in vital_memberships.items():
+        concern = custom_mf_sbp_sharper.LABEL_TO_CONCERN.get(key)
+        if concern is None:
+            key_lower = key.lower()
+            if "severe" in key_lower:
+                concern = "Severe concern"
+            elif "moderate" in key_lower:
+                concern = "Moderate concern"
+            elif "mild" in key_lower:
+                concern = "Mild concern"
+            elif "no concern" in key_lower:
+                concern = "No concern"
+        if concern:
+            mapping[concern] = max(mapping[concern], value)
+    return mapping
+
+
+def firings_sharper(
+    hr: int, bp: int, temp: float, resp: float, ox: float, insp: float, base_dir: Path,
+) -> Dict[str, Dict[str, float]]:
+    """Same as firings(), but SBP uses the asymmetric 6-set input MF."""
+    heart_rate, _, temperature, respiratory_rate, oxygen_saturation, inspired_oxygen = load_membership_functions(base_dir)
+    blood_pressure = load_sharper_sbp(base_dir)
+    return {
+        "heart rate": heart_rate(hr),
+        "blood pressure": blood_pressure(bp),
+        "temperature": temperature(temp),
+        "respiratory rate": respiratory_rate(resp),
+        "oxygen saturation": oxygen_saturation(ox),
+        "inspired oxygen": inspired_oxygen(insp),
+    }
+
+
+def calculate_fuzzy_ews_sharper(
+    all_firings: Dict[str, Dict[str, float]],
+    method: str,
+    gamma: float = 1.0,
+) -> Dict[str, float]:
+    """Per-vital defuzzification that uses the sharper mapping for SBP only."""
+    per_vital_scores: Dict[str, float] = {}
+    for vital_name, vital_memberships in all_firings.items():
+        if vital_name == "blood pressure":
+            concern_levels = map_to_concern_levels_sharper_sbp(vital_memberships)
+        else:
+            concern_levels = map_to_concern_levels(vital_memberships)
         score = defuzz_vital_centroid(concern_levels)
         per_vital_scores[vital_name] = score
     per_vital_scores["total"] = aggregate_total(per_vital_scores, method, power=2.0, gamma=gamma)
@@ -1435,8 +1576,33 @@ def _compute_temporal_adjusted_scores(
     return results
 
 
-def _render_temporal_tab(prefix: str) -> None:
-    """Two-step temporal adjustment: EWMA smoothing + worsening-trend factor."""
+def _render_temporal_tab(prefix: str, scoring_variant: str = "standard") -> None:
+    """Two-step temporal adjustment: EWMA smoothing + worsening-trend factor.
+
+    scoring_variant:
+        "standard"     - symmetric per-vital mapping (same as tabs 1 and 2).
+        "sharper_sbp"  - systolic BP uses an asymmetric mapping: above-mild and
+                         above-moderate collapse into a single "elevated" set
+                         capped at Mild concern, while above-severe maps to
+                         Severe concern. Encodes the clinical prior that
+                         sustained hypertension is rarely the proximate cause
+                         of short-term deterioration, but a hypertensive
+                         crisis is. Hypotension and every other vital are
+                         unchanged.
+    """
+    if scoring_variant == "sharper_sbp":
+        firings_fn = firings_sharper
+        calc_fn = calculate_fuzzy_ews_sharper
+        st.caption(
+            "**Asymmetric SBP variant.** Same temporal logic as the previous tab, "
+            "but systolic BP uses a clinically-asymmetric mapping: above-mild and "
+            "above-moderate collapse into a single 'elevated' set capped at Mild "
+            "concern, while above-severe still maps to Severe concern. Hypotension "
+            "and every other vital are unchanged."
+        )
+    else:
+        firings_fn = firings
+        calc_fn = calculate_fuzzy_ews
     st.caption(
         "Add sequential observations to build a timeline. Each vital's concern "
         "score (0\u20133) is smoothed with an exponentially weighted moving average "
@@ -1549,6 +1715,44 @@ def _render_temporal_tab(prefix: str) -> None:
             "behaviour, while \u03b3 = 0.0 makes the total driven purely by the worst single vital."
         )
 
+    if scoring_variant == "sharper_sbp":
+        with st.expander("Asymmetric systolic BP membership function", expanded=True):
+            st.markdown(
+                "In this tab, SBP uses a 6-set input rather than the symmetric 7-set model. "
+                "The **above-mild** and **above-moderate** sigmoids are summed (clipped to 1.0) "
+                "into a single **Above normal - elevated** set. The mapping to output concern "
+                "levels is then:\n\n"
+                "* Below severe \u2192 **Severe concern**\n"
+                "* Below moderate \u2192 **Moderate concern**\n"
+                "* Below mild \u2192 **Mild concern**\n"
+                "* No concern \u2192 **No concern**\n"
+                "* Above elevated \u2192 **Mild concern** *(capped)*\n"
+                "* Above severe \u2192 **Severe concern**\n\n"
+                "So the Moderate output bucket is only reachable from hypotension \u2014 "
+                "hypertension can contribute at most ~1/3 to the per-vital score until it "
+                "becomes a true crisis, at which point it climbs smoothly toward 3/3."
+            )
+            sharper_bp = load_sharper_sbp(selected_dir)
+            timeline_snapshot = st.session_state.get(timeline_key, [])
+            latest_bp = float(timeline_snapshot[-1]["blood_pressure"]) if timeline_snapshot else 120.0
+            st.altair_chart(
+                membership_chart(sharper_bp.chart_df(), latest_bp, "mmHg"),
+                use_container_width=True,
+            )
+            if timeline_snapshot:
+                st.caption(
+                    f"Red line = most recent observation ({int(latest_bp)} mmHg). "
+                    "Compare the above side to tabs 1\u20133 to see the collapse."
+                )
+            else:
+                st.caption("Red line = reference at 120 mmHg. Add observations to shift it.")
+            mapping_rows = [
+                {"Input set": label, "Output concern level": concern}
+                for label, concern in custom_mf_sbp_sharper.LABEL_TO_CONCERN.items()
+            ]
+            st.markdown("**Input set \u2192 output concern mapping**")
+            st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+
     # ------------------------------------------------------------------
     # Add observation
     # ------------------------------------------------------------------
@@ -1623,11 +1827,11 @@ def _render_temporal_tab(prefix: str) -> None:
     if add_clicked:
         raw_obs = Observation(hr=int(hr), bp=int(bp), temp=float(temp), resp=int(resp), ox_sats=int(ox), insp_ox=int(insp))
         clamped = clamp_observation(raw_obs, selected_dir)
-        all_f = firings(
+        all_f = firings_fn(
             clamped.hr, clamped.bp, clamped.temp, clamped.resp,
             clamped.ox_sats, clamped.insp_ox, selected_dir,
         )
-        pv_scores = calculate_fuzzy_ews(all_f, aggregation_method, gamma=cfg_gamma)
+        pv_scores = calc_fn(all_f, aggregation_method, gamma=cfg_gamma)
         fuzzy_total = float(pv_scores.pop("total", 0.0))
         _, news_total = calculate_news2(raw_obs)
 
@@ -1693,11 +1897,11 @@ def _render_temporal_tab(prefix: str) -> None:
             insp_ox=float(entry["inspired_oxygen"]),
         )
         obs_model = clamp_observation(obs_raw, selected_dir)
-        all_f = firings(
+        all_f = firings_fn(
             obs_model.hr, obs_model.bp, obs_model.temp, obs_model.resp,
             obs_model.ox_sats, obs_model.insp_ox, selected_dir,
         )
-        pv_scores = calculate_fuzzy_ews(all_f, aggregation_method, gamma=cfg_gamma)
+        pv_scores = calc_fn(all_f, aggregation_method, gamma=cfg_gamma)
         if needs_snap:
             entry["snapshot_fuzzy_ews"] = round(float(pv_scores.get("total", 0.0)), 2)
             _, news_total = calculate_news2(obs_raw)
@@ -1884,9 +2088,12 @@ def main() -> None:
     st.set_page_config(page_title="Fuzzy EWS", page_icon="\U0001fa7a", layout="wide")
     st.title("Fuzzy Early Warning Score (EWS)")
 
-    tab_t1, tab_it2, tab_temporal = st.tabs(
-        ["Type-1 FLS", "Interval Type-2 FLS", "Temporal Context Builder"]
-    )
+    tab_t1, tab_it2, tab_temporal, tab_sharper = st.tabs([
+        "Type-1 FLS",
+        "Interval Type-2 FLS",
+        "Temporal Context Builder",
+        "Temporal (Asymmetric SBP)",
+    ])
 
     with tab_t1:
         _render_t1_tab("t1")
@@ -1896,6 +2103,9 @@ def main() -> None:
 
     with tab_temporal:
         _render_temporal_tab("temporal")
+
+    with tab_sharper:
+        _render_temporal_tab("temporal_sharper", scoring_variant="sharper_sbp")
 
 
 try:
