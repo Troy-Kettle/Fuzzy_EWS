@@ -385,6 +385,7 @@ def run_grid_search(
     results = []
     combo = 0
     t_search_start = time.time()
+    snapshot_total = sum(pv_scores[v] for v in VITALS)
 
     for alpha in ALPHA_GRID:
         t_alpha = time.time()
@@ -421,6 +422,7 @@ def run_grid_search(
                     max_vital = stacked.max(axis=1)
                     max_based = (18.0 / 3.0) * max_vital
                     total = (1.0 - gamma) * max_based + gamma * additive
+                total = np.maximum(total, snapshot_total)
 
                 valid = np.isfinite(total)
                 obs_auroc = roc_auc_score(label[valid], total[valid])
@@ -584,6 +586,7 @@ def plot_roc_comparison(
         max_vital = stacked.max(axis=1)
         max_based = (18.0 / 3.0) * max_vital
         temporal_total = (1.0 - gamma) * max_based + gamma * additive
+    temporal_total = np.maximum(temporal_total, snapshot_total)
 
     news2 = df["NEWS-2"].values
 

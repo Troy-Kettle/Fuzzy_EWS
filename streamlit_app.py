@@ -1532,11 +1532,12 @@ def _compute_temporal_adjusted_scores(
 
         # Step 1: EWMA of concern scores over the full timeline
         ewma_scores = _ewma(raw_scores, config.ewma_alpha)
-        # Ensure the temporally smoothed score never falls below the latest snapshot
-        # so temporal context can only maintain or increase concern relative to
-        # the current raw value, not reduce it.
+        # Alpha must not reduce concern: clamp EWMA up to the raw score at each time.
+        clamped_ewma_scores = [
+            max(ewma, raw) for ewma, raw in zip(ewma_scores, raw_scores)
+        ]
         latest_raw = raw_scores[-1]
-        ewma_current = max(ewma_scores[-1], latest_raw)
+        ewma_current = clamped_ewma_scores[-1]
 
         # Step 2: linear trend in RAW concern scores within the look-back window
         window_raw: list[float] = []
@@ -1564,7 +1565,7 @@ def _compute_temporal_adjusted_scores(
 
         results[vital] = {
             "raw_scores": [round(s, 3) for s in raw_scores],
-            "ewma_scores": [round(s, 3) for s in ewma_scores],
+            "ewma_scores": [round(s, 3) for s in clamped_ewma_scores],
             "ewma_current": round(ewma_current, 3),
             "trend_slope": round(slope, 4),
             "trend_factor": round(trend_factor, 4),
@@ -1704,6 +1705,8 @@ def _render_temporal_tab(prefix: str, scoring_variant: str = "standard") -> None
             "This guarantees the result stays in [0, 3] and never falls below the latest snapshot."
             " Improving or stable trends (slope \u2264 0) produce no adjustment \u2014 the clamped EWMA "
             "value is used as-is.\n\n"
+            "The EWMA and trend-adjusted **overall totals** are likewise clamped upward to the "
+            "latest snapshot total, so alpha cannot reduce the headline concern score.\n\n"
             "**Gamma (\u03b3) \u2014 single-vital dominance in totals**\n\n"
             "When totals are formed from per-vital scores in the temporal builder, gamma controls how "
             "much a single extremely abnormal vital can dominate the overall fuzzy total:\n\n"
@@ -1926,6 +1929,9 @@ def _render_temporal_tab(prefix: str, scoring_variant: str = "standard") -> None
     adjusted_per_vital = {vital: r.get("adjusted_score", 0.0) for vital, r in temporal_results.items()}
     ewma_total = aggregate_total(ewma_per_vital, method="additive", power=2.0, gamma=cfg_gamma)
     adjusted_total = aggregate_total(adjusted_per_vital, method="additive", power=2.0, gamma=cfg_gamma)
+    # Temporal context (alpha / EWMA) must not lower the overall concern score.
+    ewma_total = max(ewma_total, snapshot_total)
+    adjusted_total = max(adjusted_total, snapshot_total)
 
     # ------------------------------------------------------------------
     # Headline metrics
@@ -1943,7 +1949,7 @@ def _render_temporal_tab(prefix: str, scoring_variant: str = "standard") -> None
             "EWMA total (0\u201318)",
             f"{ewma_total:.2f}",
             delta=f"{ewma_total - snapshot_total:+.2f}",
-            help="Sum of EWMA-smoothed per-vital scores (Step 1: memory of recent history).",
+            help="Sum of EWMA-smoothed per-vital scores (Step 1). Clamped so it cannot fall below the snapshot total.",
         )
     with m3:
         adj_display = min(adjusted_total, 18.0)

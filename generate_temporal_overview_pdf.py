@@ -419,6 +419,11 @@ def build_pdf():
     pdf.formula("additive_total = SUM(per_vital_scores)")
     pdf.formula("max_based_total = (18 / 3) * max(per_vital_scores)")
     pdf.formula("total = (1 - gamma) * max_based_total + gamma * additive_total")
+    pdf.formula("total = max(total, snapshot_total)")
+    pdf.body(
+        "The final max() guarantees that EWMA smoothing (alpha) cannot reduce the "
+        "overall concern score below the latest snapshot total."
+    )
     pdf.body("How to read gamma:")
     pdf.bullet("gamma = 1.0 keeps the total approximately additive.")
     pdf.bullet("gamma = 0.0 lets the single worst vital dominate the overall total.")

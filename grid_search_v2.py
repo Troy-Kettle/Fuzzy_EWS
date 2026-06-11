@@ -296,6 +296,7 @@ def run_grid(
     results: List[ComboResult] = []
     combo = 0
     t0 = time.time()
+    snapshot_total = sum(pv_scores[v] for v in VITALS)
 
     for alpha in alpha_grid:
         # Cache EWMA-clamped once per α (no β/γ dependence)
@@ -324,7 +325,7 @@ def run_grid(
 
             for gamma in gamma_grid:
                 combo += 1
-                total = aggregate_total(adjusted, gamma)
+                total = np.maximum(aggregate_total(adjusted, gamma), snapshot_total)
 
                 m = evaluate_on_folds(total, label, news2, folds, K_FOLDS)
                 fold_aurocs = m["auroc_obs"]
@@ -518,7 +519,7 @@ def plot_final_roc(
         pv_scores, all_slopes, group_starts, group_ends,
         alpha=best.alpha, beta=best.beta,
     )
-    temporal = aggregate_total(adjusted, best.gamma)
+    temporal = np.maximum(aggregate_total(adjusted, best.gamma), snapshot)
 
     curves = [
         ("NEWS-2", news2, "tab:orange"),

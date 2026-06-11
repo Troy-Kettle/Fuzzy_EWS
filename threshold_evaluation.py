@@ -96,11 +96,13 @@ def compute_temporal_total(pv_scores, all_slopes, group_starts, group_ends):
         adj = clamped + tf * (3.0 - clamped)
         adjusted[vital] = np.clip(adj, 0.0, 3.0).astype(np.float32)
 
+    snapshot = sum(pv_scores[v] for v in VITALS)
     additive = sum(adjusted[v] for v in VITALS)
     stacked = np.column_stack([adjusted[v] for v in VITALS])
     max_vital = stacked.max(axis=1)
     max_based = (18.0 / 3.0) * max_vital
-    return (1.0 - GAMMA) * max_based + GAMMA * additive
+    total = (1.0 - GAMMA) * max_based + GAMMA * additive
+    return np.maximum(total, snapshot).astype(np.float32)
 
 
 # =====================================================================

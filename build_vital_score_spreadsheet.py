@@ -7,13 +7,28 @@ For every input value on each vital's membership-function grid, compute:
 
 Writes a styled workbook with one sheet per vital.
 
+Blood pressure uses the asymmetric (Tab 4) variant: above-normal mild and
+moderate concern sets are merged into a single "elevated" → Mild concern
+mapping, so Moderate concern is never fired from elevated BP.  Only a
+hypertensive crisis (≥220 mmHg) reaches Severe concern from the upper side.
+
+Supplementary oxygen is expressed as nasal-cannula flow rate (L/min) and uses
+membership functions derived directly from Part 1 training-data event rates —
+no FiO₂ conversion formula is applied.  Gaussian CDF transitions are placed at
+empirically justified breakpoints (No concern→Mild at 2 L/min, Mild→Moderate
+at 5 L/min, Moderate→Severe at 9 L/min).
+NEWS-2 adds +2 whenever any supplemental oxygen is in use
+(0 L/min → 0 points; any flow > 0 → +2 points).
+
 Run:  python3 build_vital_score_spreadsheet.py
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+import pandas as pd
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -24,9 +39,67 @@ from streamlit_app import (
     custom_mf_3_var_down,
     custom_mf_3_var_up,
     custom_mf_7_var,
+    custom_mf_sbp_sharper,
     defuzz_vital_centroid,
     map_to_concern_levels,
+    map_to_concern_levels_sharper_sbp,
 )
+
+# ---------------------------------------------------------------------------
+# Supplementary oxygen (L/min) membership function generation
+# ---------------------------------------------------------------------------
+# Membership functions are constructed via Gaussian CDF transitions placed at
+# clinically and empirically justified breakpoints derived from Part 1 training
+# data event rates (REVIEW_WITHIN_4HOURS).  No L/min → FiO₂ formula is used.
+#
+# Empirical event rates from Part 1 data:
+#   0 L/min (room air): 0.0062   1 L/min: 0.0113   2 L/min: 0.0127
+#   3 L/min: 0.0149              4 L/min: 0.0193    5 L/min: 0.0145
+#   8 L/min: 0.0280             10 L/min: 0.0303   15 L/min: 0.0513
+#
+# Transition centres and Gaussian spreads (σ):
+#   No concern → Mild     : centre 2 L/min, σ = 1.5
+#   Mild → Moderate       : centre 5 L/min, σ = 2.0
+#   Moderate → Severe     : centre 9 L/min, σ = 3.0
+#
+# These parameters mirror the same Gaussian CDF construction used for the FiO₂
+# membership functions (verified against the sigmoid CSV), giving a consistent
+# methodology while using the L/min scale directly.
+#
+# Partition of unity is preserved exactly:
+#   nc(x) = 1 − Φ((x−t1)/σ1)
+#   mild(x) = Φ((x−t1)/σ1) − Φ((x−t2)/σ2)
+#   mod(x)  = Φ((x−t2)/σ2) − Φ((x−t3)/σ3)
+#   sev(x)  = Φ((x−t3)/σ3)
+#   ⇒ nc + mild + mod + sev = 1 for all x
+
+LMIN_MF_FILENAME = "supplementary_oxygen_lmin_membership_functions.csv"
+
+_LMIN_T1, _LMIN_S1 = 2.0, 1.5   # No concern → Mild
+_LMIN_T2, _LMIN_S2 = 5.0, 2.0   # Mild → Moderate
+_LMIN_T3, _LMIN_S3 = 9.0, 3.0   # Moderate → Severe
+
+
+def _ncdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2)))
+
+
+def generate_lmin_mf_csv(output_path: Path) -> None:
+    """Generate the supplementary oxygen L/min membership function CSV."""
+    rows = []
+    for lmin in range(0, 16):
+        nc   = 1.0 - _ncdf((lmin - _LMIN_T1) / _LMIN_S1)
+        mild = _ncdf((lmin - _LMIN_T1) / _LMIN_S1) - _ncdf((lmin - _LMIN_T2) / _LMIN_S2)
+        mod  = _ncdf((lmin - _LMIN_T2) / _LMIN_S2) - _ncdf((lmin - _LMIN_T3) / _LMIN_S3)
+        sev  = _ncdf((lmin - _LMIN_T3) / _LMIN_S3)
+        rows.append({
+            "Value": float(lmin),
+            "No concern": nc,
+            "Above normal - mild concern": mild,
+            "Above normal - moderate concern": mod,
+            "Above normal - severe concern": sev,
+        })
+    pd.DataFrame(rows).to_csv(output_path, index=False)
 
 OUTPUT_PATH = Path(__file__).parent / "vital_score_reference.xlsx"
 
@@ -104,6 +177,11 @@ def news_fio2_flag(x: float) -> int:
     return 2 if x > 21 else 0
 
 
+def news_lmin(x: float) -> int:
+    """NEWS-2 supplemental O2 flag expressed in L/min: 0 at room air, +2 on any flow."""
+    return 2 if x > 0 else 0
+
+
 # ---------------------------------------------------------------------------
 # Vital specifications
 # ---------------------------------------------------------------------------
@@ -118,6 +196,7 @@ class VitalSpec:
     news_column_header: str
     is_decimal: bool  # True for temperature (one decimal), False otherwise
     news_notes: str
+    concern_fn: Optional[Callable] = field(default=None)  # None → map_to_concern_levels
 
 
 VITALS: list[VitalSpec] = [
@@ -138,14 +217,20 @@ VITALS: list[VitalSpec] = [
         sheet_name="Blood Pressure",
         unit="mmHg",
         csv_filename="systolic_blood_pressure_membership_functions.csv",
-        mf_class=custom_mf_7_var,
+        mf_class=custom_mf_sbp_sharper,
         news_fn=news_bp,
         news_column_header="NEWS-2",
         is_decimal=False,
         news_notes=(
-            "NEWS-2 Systolic BP (Scale 1): "
-            "≤90→3, 91-100→2, 101-110→1, 111-219→0, ≥220→3."
+            "Systolic BP — asymmetric (Tab 4) fuzzy scoring. "
+            "Hypotensive side unchanged: ≤90→3, 91-100→2, 101-110→1. "
+            "Above normal: mild-raised and moderately-raised fuzzy sets are merged "
+            "into a single 'elevated' set mapped to Mild concern only — Moderate "
+            "concern is never fired from the upper side. "
+            "Only a hypertensive crisis (≥220 mmHg) reaches Severe concern. "
+            "NEWS-2 column (unchanged): ≤90→3, 91-100→2, 101-110→1, 111-219→0, ≥220→3."
         ),
+        concern_fn=map_to_concern_levels_sharper_sbp,
     ),
     VitalSpec(
         sheet_name="Temperature",
@@ -186,7 +271,24 @@ VITALS: list[VitalSpec] = [
         ),
     ),
     VitalSpec(
-        sheet_name="Inspired Oxygen",
+        sheet_name="Supplementary Oxygen",
+        unit="L/min",
+        csv_filename=LMIN_MF_FILENAME,
+        mf_class=custom_mf_3_var_up,
+        news_fn=news_lmin,
+        news_column_header="NEWS-2 (supp. O2 flag)",
+        is_decimal=False,
+        news_notes=(
+            "Supplementary oxygen flow rate (nasal cannula, L/min). "
+            "Membership functions derived directly from Part 1 training-data event rates "
+            "using Gaussian CDF transitions (no FiO₂ conversion formula). "
+            "Transition centres: No concern→Mild at 2 L/min, Mild→Moderate at 5 L/min, "
+            "Moderate→Severe at 9 L/min. "
+            "NEWS-2: 0 L/min (room air) → 0 points; any supplemental flow > 0 → +2 points."
+        ),
+    ),
+    VitalSpec(
+        sheet_name="Inspired Oxygen (FiO2)",
         unit="% FiO2",
         csv_filename="inspired_oxygen_concentration_membership_functions.csv",
         mf_class=custom_mf_3_var_up,
@@ -194,9 +296,11 @@ VITALS: list[VitalSpec] = [
         news_column_header="NEWS-2 (supp. O2 flag)",
         is_decimal=False,
         news_notes=(
-            "NEWS-2 has no per-value FiO2 score. It adds +2 to the total whenever "
-            "the patient is on supplemental oxygen (FiO2 > 21%). This column shows "
-            "that flag: 0 at 21%, 2 above."
+            "Inspired oxygen concentration (% FiO2) directly from the generated "
+            "membership functions (21–100%). "
+            "NEWS-2 has no per-value FiO2 score; it adds +2 whenever the patient "
+            "is on supplemental oxygen (FiO2 > 21%). This column shows that flag: "
+            "0 at 21%, 2 above."
         ),
     ),
 ]
@@ -206,10 +310,16 @@ VITALS: list[VitalSpec] = [
 # Scoring a single value on one vital
 # ---------------------------------------------------------------------------
 
-def compute_row(mf, value: float, news_fn: Callable[[float], int]) -> dict:
+def compute_row(
+    mf,
+    value: float,
+    news_fn: Callable[[float], int],
+    concern_fn: Optional[Callable] = None,
+) -> dict:
     """Return one row: input, NEWS score, fuzzy SS, dominant set + strength."""
+    _concern = concern_fn if concern_fn is not None else map_to_concern_levels
     memberships = mf(value)
-    ss = defuzz_vital_centroid(map_to_concern_levels(memberships))
+    ss = defuzz_vital_centroid(_concern(memberships))
     dom_label, dom_strength = max(memberships.items(), key=lambda kv: kv[1])
     return {
         "value": float(value),
@@ -239,19 +349,21 @@ CELL_BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 def write_sheet(wb: Workbook, spec: VitalSpec) -> None:
     mf = spec.mf_class(DATA_DIR_SIGMOID / spec.csv_filename)
     values = list(mf.df["Value"].values)
-    rows = [compute_row(mf, v, spec.news_fn) for v in values]
+    rows = [compute_row(mf, v, spec.news_fn, concern_fn=spec.concern_fn) for v in values]
 
     ws = wb.create_sheet(title=spec.sheet_name)
 
     # ----- Title + caption block -----
+    n_cols = 5
+    last_col = get_column_letter(n_cols)
     ws["A1"] = f"{spec.sheet_name} — NEWS-2 vs Snapshot Fuzzy Score (SS)"
     ws["A1"].font = TITLE_FONT
-    ws.merge_cells("A1:E1")
+    ws.merge_cells(f"A1:{last_col}1")
 
     ws["A2"] = spec.news_notes
     ws["A2"].font = CAPTION_FONT
     ws["A2"].alignment = LEFT
-    ws.merge_cells("A2:E2")
+    ws.merge_cells(f"A2:{last_col}2")
     ws.row_dimensions[2].height = 30
 
     ws["A3"] = (
@@ -261,7 +373,7 @@ def write_sheet(wb: Workbook, spec: VitalSpec) -> None:
     )
     ws["A3"].font = CAPTION_FONT
     ws["A3"].alignment = LEFT
-    ws.merge_cells("A3:E3")
+    ws.merge_cells(f"A3:{last_col}3")
     ws.row_dimensions[3].height = 30
 
     header_row = 5
@@ -272,6 +384,8 @@ def write_sheet(wb: Workbook, spec: VitalSpec) -> None:
         "Dominant concern set",
         "Dominant strength (0–1)",
     ]
+    col_widths = [14, 10, 22, 36, 22]
+
     for col_idx, text in enumerate(headers, start=1):
         cell = ws.cell(row=header_row, column=col_idx, value=text)
         cell.font = HEADER_FONT
@@ -282,6 +396,7 @@ def write_sheet(wb: Workbook, spec: VitalSpec) -> None:
 
     # ----- Data rows -----
     value_fmt = "0.0" if spec.is_decimal else "0"
+    n_data_cols = 5
     for i, r in enumerate(rows):
         excel_row = header_row + 1 + i
         stripe = (i % 2 == 1)
@@ -292,7 +407,7 @@ def write_sheet(wb: Workbook, spec: VitalSpec) -> None:
         ws.cell(row=excel_row, column=4, value=r["dom_label"])
         ws.cell(row=excel_row, column=5, value=r["dom_strength"]).number_format = "0.000"
 
-        for col_idx in range(1, 6):
+        for col_idx in range(1, n_data_cols + 1):
             cell = ws.cell(row=excel_row, column=col_idx)
             cell.border = CELL_BORDER
             cell.alignment = CENTER if col_idx != 4 else LEFT
@@ -300,8 +415,7 @@ def write_sheet(wb: Workbook, spec: VitalSpec) -> None:
                 cell.fill = ZEBRA_FILL
 
     # ----- Column widths -----
-    widths = [14, 10, 22, 36, 22]
-    for col_idx, w in enumerate(widths, start=1):
+    for col_idx, w in enumerate(col_widths, start=1):
         ws.column_dimensions[get_column_letter(col_idx)].width = w
 
     ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
@@ -347,6 +461,10 @@ def write_overview_sheet(wb: Workbook) -> None:
 
 
 def main() -> None:
+    lmin_csv_path = DATA_DIR_SIGMOID / LMIN_MF_FILENAME
+    generate_lmin_mf_csv(lmin_csv_path)
+    print(f"Generated {lmin_csv_path.name}")
+
     wb = Workbook()
     wb.remove(wb.active)  # drop the default empty sheet
 
