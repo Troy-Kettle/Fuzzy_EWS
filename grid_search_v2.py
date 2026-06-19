@@ -158,6 +158,7 @@ def compute_adjusted_per_vital(
     all_slopes: Dict[str, np.ndarray],
     group_starts: np.ndarray,
     group_ends: np.ndarray,
+    times: np.ndarray,
     alpha: float,
     beta: float,
 ) -> Dict[str, np.ndarray]:
@@ -169,7 +170,7 @@ def compute_adjusted_per_vital(
     out: Dict[str, np.ndarray] = {}
     for v in VITALS:
         raw = pv_scores[v]
-        ewma = _ewma_all(group_starts, group_ends, raw, alpha)
+        ewma = _ewma_all(group_starts, group_ends, raw, times, alpha)
         clamped = np.maximum(ewma, raw)          # "don't forget bad news"
 
         slope = all_slopes[v]
@@ -297,13 +298,14 @@ def run_grid(
     combo = 0
     t0 = time.time()
     snapshot_total = sum(pv_scores[v] for v in VITALS)
+    t_minutes = df["t_minutes"].values.astype(np.float64)
 
     for alpha in alpha_grid:
         # Cache EWMA-clamped once per α (no β/γ dependence)
         clamped_cache: Dict[str, np.ndarray] = {}
         for v in VITALS:
             raw = pv_scores[v]
-            ew = _ewma_all(group_starts, group_ends, raw, alpha)
+            ew = _ewma_all(group_starts, group_ends, raw, t_minutes, alpha)
             clamped_cache[v] = np.maximum(ew, raw)
 
         for beta in beta_grid:
@@ -517,6 +519,7 @@ def plot_final_roc(
 
     adjusted = compute_adjusted_per_vital(
         pv_scores, all_slopes, group_starts, group_ends,
+        df["t_minutes"].values.astype(np.float64),
         alpha=best.alpha, beta=best.beta,
     )
     temporal = np.maximum(aggregate_total(adjusted, best.gamma), snapshot)

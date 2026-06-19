@@ -62,12 +62,12 @@ def precompute_slopes(df, pv_scores):
     return all_slopes, group_starts, group_ends
 
 
-def compute_temporal_total(pv_scores, all_slopes, group_starts, group_ends):
+def compute_temporal_total(pv_scores, all_slopes, group_starts, group_ends, t_minutes):
     """Temporal-adjusted score per row (history-aware)."""
     adjusted = {}
     for vital in VITALS:
         raw = pv_scores[vital]
-        ew = _ewma_all(group_starts, group_ends, raw, ALPHA)
+        ew = _ewma_all(group_starts, group_ends, raw, t_minutes, ALPHA)
         clamped = np.maximum(ew, raw)
         slope = all_slopes[vital]
 
@@ -139,7 +139,9 @@ def main():
 
     print("\nComputing temporal scores (history-aware) …")
     all_slopes, gs, ge = precompute_slopes(df, pv_scores)
-    temporal_total = compute_temporal_total(pv_scores, all_slopes, gs, ge)
+    temporal_total = compute_temporal_total(
+        pv_scores, all_slopes, gs, ge, df["t_minutes"].values.astype(np.float64),
+    )
 
     print("\nCollapsing to patient-level cases …")
     pat = collapse_patient_level(df, news2, snapshot_total, temporal_total)

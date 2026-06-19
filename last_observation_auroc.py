@@ -63,12 +63,12 @@ def precompute_slopes(df, pv_scores):
     return all_slopes, group_starts, group_ends
 
 
-def compute_temporal_total(pv_scores, all_slopes, group_starts, group_ends):
+def compute_temporal_total(pv_scores, all_slopes, group_starts, group_ends, t_minutes):
     """Compute temporal-adjusted total score at every row."""
     adjusted = {}
     for vital in VITALS:
         raw = pv_scores[vital]
-        ew = _ewma_all(group_starts, group_ends, raw, ALPHA)
+        ew = _ewma_all(group_starts, group_ends, raw, t_minutes, ALPHA)
         clamped = np.maximum(ew, raw)
 
         slope = all_slopes[vital]
@@ -121,7 +121,10 @@ def main():
     print("\nPrecomputing slopes for temporal system …")
     all_slopes, group_starts, group_ends = precompute_slopes(df, pv_scores)
     print("\nComputing temporal-adjusted totals …")
-    temporal_total = compute_temporal_total(pv_scores, all_slopes, group_starts, group_ends)
+    temporal_total = compute_temporal_total(
+        pv_scores, all_slopes, group_starts, group_ends,
+        df["t_minutes"].values.astype(np.float64),
+    )
 
     # 4) Keep only each patient's final observation.
     idx_last = last_index_per_patient(patient_ids)

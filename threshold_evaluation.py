@@ -81,11 +81,11 @@ def precompute_slopes(df, pv_scores):
     return all_slopes, group_starts, group_ends
 
 
-def compute_temporal_total(pv_scores, all_slopes, group_starts, group_ends):
+def compute_temporal_total(pv_scores, all_slopes, group_starts, group_ends, t_minutes):
     adjusted = {}
     for vital in VITALS:
         raw = pv_scores[vital]
-        ew = _ewma_all(group_starts, group_ends, raw, ALPHA)
+        ew = _ewma_all(group_starts, group_ends, raw, t_minutes, ALPHA)
         clamped = np.maximum(ew, raw)
         slope = all_slopes[vital]
         pos = slope > 0
@@ -351,7 +351,9 @@ def main():
 
     print("\nComputing temporal-adjusted total …", flush=True)
     t0 = time.time()
-    temporal_total = compute_temporal_total(pv_scores, all_slopes, gs, ge)
+    temporal_total = compute_temporal_total(
+        pv_scores, all_slopes, gs, ge, df["t_minutes"].values.astype(np.float64),
+    )
     temporal_total = temporal_total.astype(np.float32)
     print(f"  Done in {time.time()-t0:.0f}s")
 

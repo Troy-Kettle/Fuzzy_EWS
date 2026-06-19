@@ -34,6 +34,29 @@ PART2_COMBINATIONS = {
 }
 
 
+AVPU_OPTIONS = [
+    "Alert",
+    "Responds to voice",
+    "Newly confused / agitated",
+    "Responds to pain",
+    "Unresponsive",
+]
+AVPU_FUZZY_SCORE = {
+    "Alert": 0.0,
+    "Responds to voice": 1.0,
+    "Newly confused / agitated": 2.0,
+    "Responds to pain": 3.0,
+    "Unresponsive": 3.0,
+}
+AVPU_NEWS2_SCORE = {
+    "Alert": 0,
+    "Responds to voice": 3,
+    "Newly confused / agitated": 3,
+    "Responds to pain": 3,
+    "Unresponsive": 3,
+}
+
+
 @dataclass(frozen=True)
 class Observation:
     hr: int
@@ -42,6 +65,7 @@ class Observation:
     resp: float
     ox_sats: float
     insp_ox: float
+    avpu: str = "Alert"
 
 
 def _interp_lookup(fs: dict, inp: float) -> float:
@@ -378,8 +402,24 @@ def output_cache() -> Tuple[OutputMF, Dict[float, Dict[str, float]]]:
     return output, cache
 
 
-def firings(hr: int, bp: int, temp: float, resp: float, ox: float, insp: float, base_dir: Path) -> Dict[str, Dict[str, float]]:
+def firings(
+    hr: int,
+    bp: int,
+    temp: float,
+    resp: float,
+    ox: float,
+    insp: float,
+    base_dir: Path,
+    avpu: str = "Alert",
+) -> Dict[str, Dict[str, float]]:
     heart_rate, blood_pressure, temperature, respiratory_rate, oxygen_saturation, inspired_oxygen = load_membership_functions(base_dir)
+    avpu_score = AVPU_FUZZY_SCORE.get(avpu, 0.0)
+    avpu_memberships = {
+        "No concern": 1.0 if avpu_score == 0 else 0.0,
+        "Above normal - mild concern": 1.0 if avpu_score == 1 else 0.0,
+        "Above normal - moderate concern": 1.0 if avpu_score == 2 else 0.0,
+        "Above normal - severe concern": 1.0 if avpu_score >= 3 else 0.0,
+    }
     return {
         "heart rate": heart_rate(hr),
         "blood pressure": blood_pressure(bp),
@@ -387,6 +427,7 @@ def firings(hr: int, bp: int, temp: float, resp: float, ox: float, insp: float, 
         "respiratory rate": respiratory_rate(resp),
         "oxygen saturation": oxygen_saturation(ox),
         "inspired oxygen": inspired_oxygen(insp),
+        "avpu acvpu": avpu_memberships,
     }
 
 
@@ -484,7 +525,7 @@ def aggregate_total(
     # Scale worst per-vital score (0-3) into the global 0-18 range, independent
     # of how many vitals are present, so at gamma = 0 a single vital near 3/3
     # can in principle drive the overall total toward 18 with no additivity.
-    max_based_total = (18.0 / max_per_vital) * max_vital
+    max_based_total = n * max_vital
     return (1.0 - gamma_clamped) * max_based_total + gamma_clamped * base_total
 
 
@@ -531,10 +572,18 @@ def map_to_concern_levels_sharper_sbp(
 
 def firings_sharper(
     hr: int, bp: int, temp: float, resp: float, ox: float, insp: float, base_dir: Path,
+    avpu: str = "Alert",
 ) -> Dict[str, Dict[str, float]]:
     """Same as firings(), but SBP uses the asymmetric 6-set input MF."""
     heart_rate, _, temperature, respiratory_rate, oxygen_saturation, inspired_oxygen = load_membership_functions(base_dir)
     blood_pressure = load_sharper_sbp(base_dir)
+    avpu_score = AVPU_FUZZY_SCORE.get(avpu, 0.0)
+    avpu_memberships = {
+        "No concern": 1.0 if avpu_score == 0 else 0.0,
+        "Above normal - mild concern": 1.0 if avpu_score == 1 else 0.0,
+        "Above normal - moderate concern": 1.0 if avpu_score == 2 else 0.0,
+        "Above normal - severe concern": 1.0 if avpu_score >= 3 else 0.0,
+    }
     return {
         "heart rate": heart_rate(hr),
         "blood pressure": blood_pressure(bp),
@@ -542,6 +591,7 @@ def firings_sharper(
         "respiratory rate": respiratory_rate(resp),
         "oxygen saturation": oxygen_saturation(ox),
         "inspired oxygen": inspired_oxygen(insp),
+        "avpu acvpu": avpu_memberships,
     }
 
 
@@ -628,20 +678,20 @@ def calculate_news2(obs: Observation) -> Tuple[Dict[str, int], int]:
             return 2
         return 3  # >=131
 
-    supplemental_o2 = obs.insp_ox > 21
-
     per_vital = {
         "respiratory rate": score_resp(obs.resp),
         "oxygen saturation": score_spo2(obs.ox_sats),
         "temperature": score_temp(obs.temp),
         "blood pressure": score_bp(obs.bp),
         "heart rate": score_hr(obs.hr),
-        # Consciousness not captured; assumed 0.
     }
 
-    total = sum(per_vital.values()) + (2 if supplemental_o2 else 0)
+    supplemental_o2 = obs.insp_ox > 21
+    consciousness = AVPU_NEWS2_SCORE.get(obs.avpu, 3)
+
+    total = sum(per_vital.values()) + (2 if supplemental_o2 else 0) + consciousness
     per_vital["supplemental oxygen"] = 2 if supplemental_o2 else 0
-    per_vital["consciousness"] = 0
+    per_vital["consciousness"] = consciousness
     return per_vital, total
 
 
@@ -1212,15 +1262,21 @@ def _render_t1_tab(prefix: str) -> None:
         with col3:
             ox = st.number_input("Oxygen saturation (%)", min_value=70, max_value=102, value=default_obs.ox_sats)
             insp = st.number_input("Inspired oxygen (% FiO2 or approximated)", min_value=21, max_value=100, value=default_obs.insp_ox)
+            avpu = st.selectbox("AVPU / ACVPU", AVPU_OPTIONS, index=AVPU_OPTIONS.index(default_obs.avpu))
         submitted = st.form_submit_button("Run inference", use_container_width=True)
 
     if submitted:
-        raw_obs = Observation(hr=int(hr), bp=int(bp), temp=float(temp), resp=int(resp), ox_sats=int(ox), insp_ox=int(insp))
+        raw_obs = Observation(
+            hr=int(hr), bp=int(bp), temp=float(temp), resp=int(resp),
+            ox_sats=int(ox), insp_ox=int(insp), avpu=avpu,
+        )
         obs = clamp_observation(raw_obs, selected_dir)
         if obs != raw_obs:
             st.info("Inputs were clamped to the membership function range used in the model.")
 
-        all_firings = firings(obs.hr, obs.bp, obs.temp, obs.resp, obs.ox_sats, obs.insp_ox, selected_dir)
+        all_firings = firings(
+            obs.hr, obs.bp, obs.temp, obs.resp, obs.ox_sats, obs.insp_ox, selected_dir, avpu=obs.avpu,
+        )
         scores = calculate_fuzzy_ews(all_firings, aggregation_method)
         total = scores.pop("total", 0.0)
         news_scores, news_total = calculate_news2(obs)
@@ -1462,15 +1518,24 @@ class TemporalConfig:
     ewma_alpha: float = 0.7
     trend_beta: float = 2.0
     window_hours: float = 24.0
+    ewma_ref_minutes: float = 60.0
 
 
-def _ewma(values: list, alpha: float) -> list:
-    """Exponentially weighted moving average."""
+def _ewma_alpha_eff(dt_minutes: float, alpha: float, ref_minutes: float) -> float:
+    if dt_minutes <= 0.0 or ref_minutes <= 0.0:
+        return alpha
+    return 1.0 - (1.0 - alpha) ** (dt_minutes / ref_minutes)
+
+
+def _ewma(values: list, times_min: list, alpha: float, ref_minutes: float = 60.0) -> list:
+    """Exponentially weighted moving average with irregular time gaps."""
     if not values:
         return []
     result = [values[0]]
-    for v in values[1:]:
-        result.append(alpha * v + (1.0 - alpha) * result[-1])
+    for i in range(1, len(values)):
+        dt = max(float(times_min[i] - times_min[i - 1]), 0.0)
+        alpha_eff = _ewma_alpha_eff(dt, alpha, ref_minutes)
+        result.append(alpha_eff * values[i] + (1.0 - alpha_eff) * result[-1])
     return result
 
 
@@ -1531,7 +1596,7 @@ def _compute_temporal_adjusted_scores(
             continue
 
         # Step 1: EWMA of concern scores over the full timeline
-        ewma_scores = _ewma(raw_scores, config.ewma_alpha)
+        ewma_scores = _ewma(raw_scores, times_min, config.ewma_alpha, config.ewma_ref_minutes)
         # Alpha must not reduce concern: clamp EWMA up to the raw score at each time.
         clamped_ewma_scores = [
             max(ewma, raw) for ewma, raw in zip(ewma_scores, raw_scores)

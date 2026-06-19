@@ -39,7 +39,9 @@ def main():
     snapshot_total = sum(pv_scores[v] for v in VITALS).astype(np.float32)
     news2 = df["NEWS-2"].values.astype(np.float32)
     all_slopes, gs, ge = precompute_slopes(df, pv_scores)
-    temporal_total = compute_temporal_total(pv_scores, all_slopes, gs, ge).astype(np.float32)
+    temporal_total = compute_temporal_total(
+        pv_scores, all_slopes, gs, ge, df["t_minutes"].values.astype(np.float64),
+    ).astype(np.float32)
 
     print("\nCollapsing to one row per patient (max label, max score) ...")
     pat = collapse_patient_level(df, news2, snapshot_total, temporal_total)

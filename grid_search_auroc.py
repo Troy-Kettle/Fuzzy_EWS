@@ -38,11 +38,14 @@ ALPHA_GRID = np.round(np.arange(0.1, 1.05, 0.1), 2).tolist()   # 10 vals
 BETA_GRID  = np.round(np.arange(0.5, 5.05, 0.5), 2).tolist()   # 10 vals
 GAMMA_GRID = np.round(np.arange(0.1, 1.05, 0.1), 2).tolist()   # 10 vals
 WINDOW_HOURS = 24.0
+# Reference spacing for α: α_eff = 1 - (1-α)^(Δt / EWMA_REF_MINUTES)
+EWMA_REF_MINUTES = 60.0
 
 # ── vital-sign configuration ────────────────────────────────────────
 VITALS = [
     "heart_rate", "blood_pressure", "temperature",
     "respiratory_rate", "oxygen_saturation", "inspired_oxygen",
+    "avpu_acvpu",
 ]
 VITAL_COL = {
     "heart_rate":        "HEART_RATE",
@@ -51,6 +54,7 @@ VITAL_COL = {
     "respiratory_rate":  "RESP_RATE",
     "oxygen_saturation": "SATS_SPO2",
     "inspired_oxygen":   "INSPIRED_O2_TEXT",
+    "avpu_acvpu":        "AVPU_ORDINAL",
 }
 MF_FILE = {
     "heart_rate":        "heart_rate_membership_functions.csv",
@@ -59,12 +63,33 @@ MF_FILE = {
     "respiratory_rate":  "respiratory_rate_membership_functions.csv",
     "oxygen_saturation": "oxygen_saturation_membership_functions.csv",
     "inspired_oxygen":   "inspired_oxygen_concentration_membership_functions.csv",
+    "avpu_acvpu":        "avpu_acvpu_membership_functions.csv",
 }
 VITAL_TYPE = {
     "heart_rate": "7var", "blood_pressure": "7var",
     "temperature": "7var", "respiratory_rate": "7var",
     "oxygen_saturation": "3var_down", "inspired_oxygen": "3var_up",
+    "avpu_acvpu": "3var_up",
 }
+
+AVPU_ORDINAL = {
+    "Alert": 0.0,
+    "Responds to voice": 1.0,
+    "Newly confused / agitated": 2.0,
+    "Responds to pain": 3.0,
+    "Unresponsive": 3.0,
+}
+MAX_FUZZY_TOTAL = len(VITALS) * 3.0
+
+
+def encode_avpu(series: pd.Series) -> np.ndarray:
+    """Map AVPU/ACVPU text categories to ordinal 0-3 for fuzzy lookup."""
+    cleaned = series.astype(str).str.strip()
+    mapped = cleaned.map(AVPU_ORDINAL)
+    unknown = mapped.isna() & cleaned.notna() & (cleaned != "nan")
+    if unknown.any():
+        print(f"  Warning: {unknown.sum():,} unknown AVPU values defaulting to Alert (0)")
+    return mapped.fillna(0.0).astype(np.float32).values
 
 LABELS_7 = [
     "Below normal - severe concern", "Below normal - moderate concern",
@@ -191,8 +216,8 @@ def load_data() -> pd.DataFrame:
     cols_needed = [
         "ANON_ADMISSION_ID", "OBS_TIME", "DAYS_SINCE_ADMISSION",
         "REVIEW_WITHIN_4HOURS", "HEART_RATE", "SYSTOLIC_BP",
-        "RESP_RATE", "SATS_SPO2", "INSPIRED_O2_TEXT", "TEMPERATURE",
-        "COMPLETE_DATA", "NEWS-2",
+        "RESP_RATE", "SATS_SPO2", "INSPIRED_O2_TEXT", "AVPU_ACVPU",
+        "TEMPERATURE", "COMPLETE_DATA", "NEWS-2",
     ]
     df = pd.read_csv(DATA_PATH, usecols=cols_needed, low_memory=False)
     print(f"  Loaded {len(df):,} rows in {time.time()-t0:.1f}s")
@@ -230,6 +255,8 @@ def load_data() -> pd.DataFrame:
     # NEWS-2: coerce blanks
     df["NEWS-2"] = pd.to_numeric(df["NEWS-2"], errors="coerce").fillna(0).astype("float32")
 
+    df["AVPU_ORDINAL"] = encode_avpu(df["AVPU_ACVPU"])
+
     # Construct t_minutes from DAYS_SINCE_ADMISSION + OBS_TIME
     obs_time = pd.to_datetime(df["OBS_TIME"], format="%H:%M:%S", errors="coerce")
     hours = obs_time.dt.hour.fillna(0).astype("float32")
@@ -259,8 +286,13 @@ def compute_fuzzy_scores(df: pd.DataFrame) -> Dict[str, np.ndarray]:
     scores: Dict[str, np.ndarray] = {}
     for vital in VITALS:
         t0 = time.time()
-        lut_x, lut_y = _build_lookup(vital)
         col_vals = df[VITAL_COL[vital]].values.astype(np.float64)
+        if vital == "avpu_acvpu":
+            scores[vital] = np.clip(col_vals, 0.0, 3.0).astype(np.float32)
+            print(f"  {vital:25s}  direct ordinal 0-3  "
+                  f"{len(col_vals)/1e6:.1f}M rows  {time.time()-t0:.1f}s")
+            continue
+        lut_x, lut_y = _build_lookup(vital)
         col_vals = np.clip(col_vals, lut_x[0], lut_x[-1])
         scores[vital] = np.interp(col_vals, lut_x, lut_y).astype(np.float32)
         print(f"  {vital:25s}  LUT {len(lut_x):>4d} pts  "
@@ -332,9 +364,27 @@ def precompute_slopes(df: pd.DataFrame,
 #  Grid search
 # =====================================================================
 
-def _ewma_all(group_starts: np.ndarray, group_ends: np.ndarray,
-              raw: np.ndarray, alpha: float) -> np.ndarray:
-    """EWMA for every observation across all patients for one vital."""
+def _ewma_alpha_eff(dt_minutes: float, alpha: float,
+                    ref_minutes: float = EWMA_REF_MINUTES) -> float:
+    """Time-adjusted EWMA weight for an irregular gap Δt since the previous obs."""
+    if dt_minutes <= 0.0 or ref_minutes <= 0.0:
+        return alpha
+    return 1.0 - (1.0 - alpha) ** (dt_minutes / ref_minutes)
+
+
+def _ewma_all(
+    group_starts: np.ndarray,
+    group_ends: np.ndarray,
+    raw: np.ndarray,
+    times: np.ndarray,
+    alpha: float,
+    ref_minutes: float = EWMA_REF_MINUTES,
+) -> np.ndarray:
+    """EWMA for every observation across all patients for one vital.
+
+    Uses time-adjusted smoothing so irregular observation gaps are handled
+    correctly: α_eff = 1 - (1-α)^(Δt / ref_minutes).
+    """
     ewma = np.empty_like(raw)
     for g in range(len(group_starts)):
         s, e = group_starts[g], group_ends[g]
@@ -342,8 +392,81 @@ def _ewma_all(group_starts: np.ndarray, group_ends: np.ndarray,
             continue
         ewma[s] = raw[s]
         for i in range(s + 1, e):
-            ewma[i] = alpha * raw[i] + (1.0 - alpha) * ewma[i - 1]
+            dt = max(float(times[i] - times[i - 1]), 0.0)
+            alpha_eff = _ewma_alpha_eff(dt, alpha, ref_minutes)
+            ewma[i] = alpha_eff * raw[i] + (1.0 - alpha_eff) * ewma[i - 1]
     return ewma
+
+
+def _trend_factor_from_slopes(slopes: np.ndarray, beta: float) -> np.ndarray:
+    """Sigmoid worsening-trend factor; zero when slope <= 0."""
+    trend_factor = np.zeros_like(slopes)
+    pos_mask = slopes > 0
+    if pos_mask.any() and beta > 0:
+        s = slopes[pos_mask]
+        ex = np.exp(np.clip(-beta * s, -700, 700))
+        trend_factor[pos_mask] = 2.0 / (1.0 + ex) - 1.0
+    return trend_factor
+
+
+def _aggregate_temporal(
+    adjusted_vitals: Dict[str, np.ndarray],
+    vitals: List[str],
+    gamma: float,
+    max_fuzzy_total: float = MAX_FUZZY_TOTAL,
+) -> np.ndarray:
+    if gamma == 1.0:
+        return sum(adjusted_vitals[v] for v in vitals).astype(np.float32)
+    additive = sum(adjusted_vitals[v] for v in vitals)
+    stacked = np.column_stack([adjusted_vitals[v] for v in vitals])
+    max_vital = stacked.max(axis=1)
+    max_based = (max_fuzzy_total / 3.0) * max_vital
+    return ((1.0 - gamma) * max_based + gamma * additive).astype(np.float32)
+
+
+def compute_temporal(
+    pv_scores: Dict[str, np.ndarray],
+    all_slopes: Dict[str, np.ndarray],
+    group_starts: np.ndarray,
+    group_ends: np.ndarray,
+    times: np.ndarray,
+    snapshot: np.ndarray,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    mode: str = "full",
+    vitals: List[str] | None = None,
+    max_fuzzy_total: float | None = None,
+) -> np.ndarray:
+    """Row-level temporal fuzzy total.
+
+    mode:
+      - "full"       : EWMA memory + worsening-trend factor (default)
+      - "ewma"       : EWMA memory only (no trend adjustment)
+      - "trend"      : worsening-trend factor on raw scores only (no EWMA)
+    """
+    vitals = vitals or VITALS
+    max_fuzzy_total = max_fuzzy_total if max_fuzzy_total is not None else MAX_FUZZY_TOTAL
+    adjusted_vitals: Dict[str, np.ndarray] = {}
+    for vital in vitals:
+        raw = pv_scores[vital]
+        if mode == "trend":
+            base = raw
+        else:
+            ew = _ewma_all(group_starts, group_ends, raw, times, alpha)
+            base = np.maximum(ew, raw)
+
+        if mode == "ewma":
+            adjusted_vitals[vital] = np.clip(base, 0.0, 3.0).astype(np.float32)
+            continue
+
+        slope = all_slopes[vital]
+        trend_factor = _trend_factor_from_slopes(slope, beta)
+        adj = base + trend_factor * (3.0 - base)
+        adjusted_vitals[vital] = np.clip(adj, 0.0, 3.0).astype(np.float32)
+
+    temporal = _aggregate_temporal(adjusted_vitals, vitals, gamma, max_fuzzy_total)
+    return np.maximum(temporal, snapshot).astype(np.float32)
 
 
 def _patient_level_auroc(
@@ -378,6 +501,7 @@ def run_grid_search(
     group_ends: np.ndarray,
 ) -> pd.DataFrame:
     label = df["REVIEW_WITHIN_4HOURS"].values.astype(np.int8)
+    t_minutes = df["t_minutes"].values.astype(np.float64)
     n_combos = len(ALPHA_GRID) * len(BETA_GRID) * len(GAMMA_GRID)
     print(f"\nGrid search: {len(ALPHA_GRID)} α × {len(BETA_GRID)} β × "
           f"{len(GAMMA_GRID)} γ = {n_combos} combinations\n")
@@ -393,7 +517,7 @@ def run_grid_search(
         ewma_clamped: Dict[str, np.ndarray] = {}
         for vital in VITALS:
             raw = pv_scores[vital]
-            ew = _ewma_all(group_starts, group_ends, raw, alpha)
+            ew = _ewma_all(group_starts, group_ends, raw, t_minutes, alpha)
             ewma_clamped[vital] = np.maximum(ew, raw)
 
         for beta in BETA_GRID:
@@ -420,7 +544,7 @@ def run_grid_search(
                     additive = sum(adjusted[v] for v in VITALS)
                     stacked = np.column_stack([adjusted[v] for v in VITALS])
                     max_vital = stacked.max(axis=1)
-                    max_based = (18.0 / 3.0) * max_vital
+                    max_based = (MAX_FUZZY_TOTAL / 3.0) * max_vital
                     total = (1.0 - gamma) * max_based + gamma * additive
                 total = np.maximum(total, snapshot_total)
 
@@ -558,6 +682,7 @@ def plot_roc_comparison(
     """ROC curves: NEWS-2  vs  snapshot fuzzy  vs  temporal-adjusted (best)."""
     _ensure_output_dir()
     label = df["REVIEW_WITHIN_4HOURS"].values.astype(np.int8)
+    t_minutes = df["t_minutes"].values.astype(np.float64)
 
     # Snapshot fuzzy total (no temporal adjustment)
     snapshot_total = sum(pv_scores[v] for v in VITALS)
@@ -567,7 +692,7 @@ def plot_roc_comparison(
     adjusted_pv: Dict[str, np.ndarray] = {}
     for vital in VITALS:
         raw = pv_scores[vital]
-        ew = _ewma_all(group_starts, group_ends, raw, alpha)
+        ew = _ewma_all(group_starts, group_ends, raw, t_minutes, alpha)
         clamped = np.maximum(ew, raw)
         slope = all_slopes[vital]
         pos = slope > 0
