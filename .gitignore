@@ -17,9 +17,16 @@ Thumbs.db
 ~$*
 
 # ── Raw training data (too big for GitHub; kept locally) ──
-20250630_final_observations-sorted_V7_training.csv
-20250630_final_observations-sorted_V7_training_balanced.csv
-20250630_final_observations-sorted_V7_training_balanced_50_50.csv
+datasets/20250630_final_observations-sorted_V7_training.csv
+datasets/20250630_final_observations-sorted_V7_training_balanced.csv
+datasets/20250630_final_observations-sorted_V7_training_balanced_50_50.csv
+datasets/20250630_final_observations-sorted_V7_training_balanced_with_death.csv
 
-# ── Large intermediate result files (> ~50 MB) ──
-threshold_results/random_50000_patients_observations_with_scores.csv
+# ── Large validation datasets (kept locally, not committed) ──
+datasets/final_observations_with_targets.csv
+datasets/final_observations_with_scores.csv
+datasets/Annotated*.xlsx
+datasets/Admission*.xlsx
+
+# ── Generated repomix exports ──
+repomix-output.*
