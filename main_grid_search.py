@@ -189,7 +189,7 @@ def main():
     df = C.load(all_columns=False)
     vitals = es.VITALS_BASE
 
-    print("\nBuilding fuzzy LUTs (engine, sharper SBP)…")
+    print("\nBuilding fuzzy LUTs (engine, five-set SBP)…")
     luts = C.build_luts(vitals)
 
     gs, ge = es.group_boundaries(df["ANON_ADMISSION_ID"].values)

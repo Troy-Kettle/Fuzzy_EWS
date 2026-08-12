@@ -193,9 +193,8 @@ def main():
     vitals = es.VITALS_BASE + [es.ACVPU] if USE_ACVPU else es.VITALS_BASE
     print(f"Vitals: {len(vitals)} ({'incl. ACVPU' if USE_ACVPU else 'no ACVPU'})")
 
-    print("Building fuzzy LUTs (engine, sharper SBP, + supplementary-O2 L/min)…")
+    print("Building fuzzy LUTs (engine, five-set SBP, + supplementary-O2 L/min)…")
     luts = {v: es.build_lut(v) for v in vitals + [es.SUPP_O2_LMIN]}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     print(f"  Computation dataset: {len(df):,} rows")
 

@@ -6,7 +6,8 @@ which implements the full set of correctness fixes:
 
   A1  defuzz exact-zero rule: a perfectly normal vital scores 0 (was ~0.25)
   A2  canonical ACVPU map: Voice=1, Confused=2 (was swapped)
-  C1  sharper SBP: hypertension above-mild/moderate collapses to a single Mild bucket
+  C1  five-set SBP: above-mild and above-moderate are absorbed into No concern, leaving
+      above-severe as the only above-normal set
   O2  inspired-oxygen scored from INSP_O2_CAT (recorded clinical category) instead
       of the broken INSPIRED_O2_TEXT field that mixes L/min flow with FiO2%
 
@@ -217,10 +218,9 @@ def main():
     df = load()
     vitals = es.VITALS_BASE   # 6 vitals (ACVPU added only in auroc_target_comparison)
 
-    # Build LUTs using engine (A1 defuzz fix + C1 sharper SBP)
-    print("Building fuzzy LUTs (engine, sharper SBP)…")
+    # Build LUTs using engine (A1 defuzz fix + five-set SBP)
+    print("Building fuzzy LUTs (engine, five-set SBP)…")
     luts = {v: es.build_lut(v) for v in vitals}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     # Sample: all event patients + NE_PATIENTS random non-event patients
     event_ids = set(df.loc[df["EVENT_FLAG"] == 1, "ANON_ADMISSION_ID"].unique())

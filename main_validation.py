@@ -221,7 +221,7 @@ def main():
     df = C.load(all_columns=True)
     # ACVPU is not a scored vital (flag only) — this stays the 6-vital set
     vitals_full = es.VITALS_BASE
-    print("\nBuilding fuzzy LUTs (engine, sharper SBP, 7 vitals)…")
+    print("\nBuilding fuzzy LUTs (engine, five-set SBP, 6 vitals)…")
     luts = C.build_luts(vitals_full)
     pv = C.build_pv(df, luts, vitals_full)
 

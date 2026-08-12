@@ -8,7 +8,7 @@ for each system, find the threshold that detects a TARGET fraction of event pati
 cost at that operating point. This answers: "at the same accuracy as NEWS-2, how much
 earlier does each system warn?"
 
-Fuzzy = best config (05_combined_best): additive, sharper SBP, α=0.1 β=0.5 γ=1.0,
+Fuzzy = best config (05_combined_best): additive, α=0.1 β=0.5 γ=1.0,
 relative excess, +ACVPU (so it has a consciousness input like NEWS-2).
 """
 import time
@@ -82,7 +82,7 @@ def curves(score, times, gs, ge, e_pat, e_row):
 def main():
     t0=time.time(); print("Loading…"); df=load(); print(f"  {len(df):,} rows ({time.time()-t0:.0f}s)")
     vitals=es.VITALS_BASE+[es.ACVPU]
-    luts=dict({v:es.build_lut(v) for v in vitals}); luts["blood_pressure"]=es.build_lut("blood_pressure",sharper_sbp=True)
+    luts=dict({v:es.build_lut(v) for v in vitals}); luts["blood_pressure"]=es.build_lut("blood_pressure")
     pv=es.apply_luts(df,luts,vitals)
     times=df["t_minutes"].values.astype(np.float64)
     gs,ge=es.group_boundaries(df["ANON_ADMISSION_ID"].values)

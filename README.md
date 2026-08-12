@@ -60,7 +60,12 @@ contribute at snapshot level only.
 Key correctness fixes applied over the original baseline:
 - **A1** — exact-zero defuzz rule: a fully normal vital scores 0 (was ~0.25)
 - **A2** — canonical ACVPU map: Alert=0, Voice=1, Confused=2, Pain/Unresponsive=3
-- **C1** — sharper SBP membership: hypertension above mild collapses to a single bucket
+- **C1** — systolic BP uses **five** sets, not seven: above-mild and above-moderate are
+  absorbed into a widened No concern, leaving above-severe as the only above-normal set
+  (`engine_scoring._merge_sbp_no_concern`). This is the only SBP model — the earlier
+  "sharper"/asymmetric variant was removed
+- **ACVPU** — not a scored vital in any system, and no bonus: any non-Alert reading flags
+  the whole row as deterioration and adds nothing to the fuzzy total or to NEWS-2
 - **O2** — inspired O2 scored from `INSP_O2_CAT` (recorded clinical category) instead
   of `INSPIRED_O2_TEXT` which mixed L/min flow rates with FiO2 percentages
 - **O2 (annotated dataset)** — where oxygen is recorded as a value plus a unit

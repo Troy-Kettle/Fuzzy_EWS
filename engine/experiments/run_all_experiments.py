@@ -258,9 +258,9 @@ def main():
     df = load()
 
     vitals_full = es.VITALS_BASE + [es.ACVPU]
-    print("Building LUTs (standard + sharper SBP)…")
+    print("Building LUTs (five-set SBP; the sharper variant no longer exists)…")
     luts_std = {v: es.build_lut(v) for v in vitals_full}
-    luts_shp = dict(luts_std); luts_shp["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
+    luts_shp = luts_std   # the sharper-SBP variant no longer exists; merged is the only model
     pv_std = es.apply_luts(df, luts_std, vitals_full)
     pv_shp = es.apply_luts(df, luts_shp, vitals_full)
 

@@ -3,7 +3,7 @@ Shared fuzzy-EWS scoring module — single source of truth for the improvement
 experiments (realises plan items A1, A2, A3, B1, C1, D1, D2, D3).
 
 This deliberately reproduces the CANONICAL engine logic in
-fuzzy_system/streamlit_app.py (defuzz centroid + aggregate_total + sharper SBP),
+fuzzy_system/streamlit_app.py (defuzz centroid + aggregate_total + five-set SBP),
 but vectorised via per-vital lookup tables so it is fast over millions of rows.
 
 Single source of truth (A3): ``grid_search_excess_patient.py``,
@@ -19,8 +19,9 @@ Key corrections vs the earlier analysis scripts:
       on the MIN_FIRING gate — see the comment there for what turning it off costs.
   A2  ACVPU text→value uses the canonical engine map (AVPU_FUZZY_SCORE, streamlit_app.py:55):
       {Alert:0, Voice:1, Confused:2, Pain:3, Unresponsive:3}.
-  C1  optional "sharper SBP" concern mapping (custom_mf_sbp_sharper): hypertension
-      (above-mild + above-moderate) collapses to a single Mild bucket.
+  C1  systolic BP uses five sets, not seven: above-mild and above-moderate are absorbed
+      into No concern, leaving above-severe as the only above-normal set. This is the
+      ONLY SBP model — see ``_merge_sbp_no_concern``.
 
 Aggregation methods (B1, engine aggregate_total):
   additive       Σ vᵢ                                   (total burden)
@@ -82,9 +83,6 @@ ACVPU_MAP = {"Alert": 0.0, "Responds to voice": 1.0,
              "Newly confused / agitated": 2.0, "Responds to pain": 3.0,
              "Unresponsive": 3.0}
 
-# Any ACVPU reading other than Alert (ACVPU_NUM > 0) is an automatic deterioration
-# signal: flagged as positive regardless of the aggregated score, AND a flat bonus
-# added to the fuzzy total on top of the vital's own defuzzified contribution.
 # ACVPU contributes NOTHING to the fuzzy score (decision of 2026-08-12). It is not a
 # scored vital and there is no bonus: any reading other than Alert makes the whole row a
 # positive flag of deterioration on its own, the way a non-Alert ACVPU triggers
@@ -296,21 +294,10 @@ def defuzz_centroid(concern: dict) -> float:
     return 0.0 if s == 0 else float(np.dot(_OX, agg) / s)
 
 
-def _map_concern(memb: dict, vital: str, sharper_sbp: bool) -> dict:
+def _map_concern(memb: dict) -> dict:
     """Collapse linguistic memberships → 4 concern levels (max within group)."""
     con = {"No concern": 0.0, "Mild concern": 0.0,
            "Moderate concern": 0.0, "Severe concern": 0.0}
-    if sharper_sbp and vital == "blood_pressure":
-        # C1: hypertension (above mild+moderate) → single Mild bucket; Moderate only
-        # ever from below-moderate. Mirrors custom_mf_sbp_sharper.LABEL_TO_CONCERN.
-        con["No concern"]       = memb.get("No concern", 0.0)
-        elevated                = min(1.0, memb.get("Above normal - mild concern", 0.0)
-                                          + memb.get("Above normal - moderate concern", 0.0))
-        con["Mild concern"]     = max(memb.get("Below normal - mild concern", 0.0), elevated)
-        con["Moderate concern"] = memb.get("Below normal - moderate concern", 0.0)
-        con["Severe concern"]   = max(memb.get("Below normal - severe concern", 0.0),
-                                      memb.get("Above normal - severe concern", 0.0))
-        return con
     for k, v in memb.items():
         kl = k.lower()
         if   "severe"   in kl: con["Severe concern"]   = max(con["Severe concern"],   v)
@@ -321,12 +308,18 @@ def _map_concern(memb: dict, vital: str, sharper_sbp: bool) -> dict:
 
 
 def _merge_sbp_no_concern(memb: dict) -> dict:
-    """Main-system SBP merge, aligned with NEWS-2 and clinical judgement: fold
+    """The ONLY systolic-BP model, aligned with NEWS-2 and clinical judgement: fold
     No concern + Above-mild + Above-moderate into one wider No concern set (sum,
-    partition of unity preserved), leaving Above-severe untouched so it now
-    overlaps the widened No concern set directly instead of sitting behind a
-    mild/moderate buffer. Mirrors app/streamlit_app.py's custom_mf_sbp_merged —
-    used only for the default (non-sharper) blood_pressure LUT."""
+    partition of unity preserved), leaving Above-severe untouched so it overlaps the
+    widened No concern set directly instead of sitting behind a mild/moderate buffer.
+
+    SBP therefore has five sets, not seven:
+        Below normal - severe / moderate / mild concern, No concern,
+        Above normal - severe concern
+
+    Mirrors app/streamlit_app.py's custom_mf_sbp_merged. The earlier "sharper" variant
+    (hypertension collapsed into a capped Mild bucket) was removed on 2026-08-12 — the
+    merged set is the one in use and there is no longer an alternative to select."""
     m = dict(memb)
     no_con = m.get("No concern", 0.0)
     a_mild = m.pop("Above normal - mild concern", 0.0)
@@ -346,26 +339,24 @@ def _merge_sbp_no_concern(memb: dict) -> dict:
 LUT_GRID_STEP = {SUPP_O2_LMIN: 0.1}
 
 
-def build_lut(vital: str, sharper_sbp: bool = False):
-    """Input value → defuzzified 0-3 score LUT (bakes in A1 zero-rule and C1).
+def build_lut(vital: str):
+    """Input value → defuzzified 0-3 score LUT (bakes in the A1 zero-rule).
 
-    For blood_pressure, sharper_sbp=False (the main/default system) applies the
-    NEWS-2-aligned No-concern merge (_merge_sbp_no_concern); sharper_sbp=True is
-    unchanged and still reads the raw 7-set columns for its own elevated-bucket
-    merge in _map_concern.
+    blood_pressure always goes through the five-set merge (``_merge_sbp_no_concern``).
+    There is no variant to choose: callers used to pass ``sharper_sbp=True`` for an
+    asymmetric alternative, which no longer exists.
     """
     df = pd.read_csv(SIGMOID_DIR / MF_FILE[vital])
     x  = df["Value"].values.astype(float)
     labels = {"7var": LABELS_7, "3var_down": LABELS_3_DOWN, "3var_up": LABELS_3_UP}[VITAL_TYPE[vital]]
-    merge_sbp = (vital == "blood_pressure" and not sharper_sbp)
     step = LUT_GRID_STEP.get(vital)
     xs = np.round(np.arange(x[0], x[-1] + step / 2.0, step), 6) if step else x
     scores = []
     for v in xs:
         memb = {lab: float(np.interp(v, x, df[lab].values)) for lab in labels}
-        if merge_sbp:
+        if vital == "blood_pressure":
             memb = _merge_sbp_no_concern(memb)
-        scores.append(defuzz_centroid(_map_concern(memb, vital, sharper_sbp)))
+        scores.append(defuzz_centroid(_map_concern(memb)))
     return xs, np.array(scores)
 
 

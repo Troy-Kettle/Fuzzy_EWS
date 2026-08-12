@@ -441,11 +441,10 @@ def main():
     print(f"  O2 via INSP_O2_CAT: {on_o2.sum():,} rows ({100*on_o2.mean():.1f}%)")
 
     # ── LUTs + per-vital scores ───────────────────────────────────────────────
-    print("\nBuilding fuzzy LUTs (engine, sharper SBP, 7 vitals)…")
+    print("\nBuilding fuzzy LUTs (engine, five-set SBP, 6 vitals)…")
     # ACVPU is not a scored vital (flag only) — this stays the 6-vital set
     vitals_full = es.VITALS_BASE
     luts = {v: es.build_lut(v) for v in vitals_full}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
     pv = build_pv(df, luts, vitals_full)
 
     gs, ge = es.group_boundaries(df["ANON_ADMISSION_ID"].values)

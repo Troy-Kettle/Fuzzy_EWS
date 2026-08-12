@@ -120,7 +120,6 @@ def main():
     # ACVPU is not a scored vital (flag only) — this stays the 6-vital set
     vitals = es.VITALS_BASE
     luts = {v: es.build_lut(v) for v in vitals}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
     pv = es.apply_luts(df, luts, vitals)
     pv["inspired_oxygen"] = df["O2_CONCERN"].values.astype(np.float32)
 

@@ -11,7 +11,7 @@ This preserves interpretability:
   - Any O2 (FiO2>21): graded score + 2, capped at 3
 
 Everything else inherits the best config from 05_combined_best:
-  additive aggregation, sharper SBP, α=0.1, β=0.5, γ=1.0, relative excess.
+  additive aggregation, α=0.1, β=0.5, γ=1.0, relative excess.
 
 Outputs → improved_results/06_supplemental_o2/ (same structure as prior experiments).
 """
@@ -55,9 +55,8 @@ def main():
 
     vitals_full = es.VITALS_BASE + [es.ACVPU]
 
-    print("Building LUTs (sharper SBP)…")
+    print("Building LUTs (five-set SBP)…")
     luts = {v: es.build_lut(v) for v in vitals_full}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     # Standard LUT-scored vitals
     pv_base = es.apply_luts(df, luts, vitals_full)

@@ -148,9 +148,8 @@ def main():
     t_total = time.time()
     df = load()
 
-    print("Building fuzzy LUTs (sharper SBP, + supplementary-O2 L/min)…")
+    print("Building fuzzy LUTs (five-set SBP, + supplementary-O2 L/min)…")
     luts = {v: es.build_lut(v) for v in VITALS + [es.SUPP_O2_LMIN]}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     lut_df = df.rename(columns={"O2_SATS": "SATS_SPO2"})
     lut_df["ACVPU_NUM"] = df["ACVPU_NUM"].values

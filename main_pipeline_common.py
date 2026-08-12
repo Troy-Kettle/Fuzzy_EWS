@@ -133,7 +133,6 @@ def build_pv(df, luts, vitals):
 
 def build_luts(vitals):
     luts = {v: es.build_lut(v) for v in vitals}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
     return luts
 
 

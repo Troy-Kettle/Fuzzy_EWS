@@ -16,7 +16,8 @@ Category → concern is a fixed, clinically-reasoned EVEN ramp (NOT tuned to AUR
   room air = 0, Low = 1.0, Low-moderate = 1.5, Moderate = 2.0, High = 2.5, Very high = 3.0
 Only the usual temporal params (α/β/γ) are grid-searched, as in every prior experiment.
 
-Everything else inherits the best config: additive, sharper SBP, +ACVPU, temporal.
+Everything else inherits the best config: additive, temporal (SBP/ACVPU handling has
+since changed — see engine_scoring).
 Supersedes 06's oxygen handling (which used a binary flag on the wrong field).
 
 Outputs → improved_results/07_oxygen_fix/ (same structure as prior experiments).
@@ -85,9 +86,8 @@ def main():
     df = load()
     vitals_full = es.VITALS_BASE + [es.ACVPU]
 
-    print("Building LUTs (sharper SBP)…")
+    print("Building LUTs (five-set SBP)…")
     luts = {v: es.build_lut(v) for v in vitals_full}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     pv = build_pv(df, luts, vitals_full)
 

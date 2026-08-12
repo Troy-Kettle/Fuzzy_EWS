@@ -171,9 +171,8 @@ def main():
     df = attach_chronic_resp(df)
     print(f"Sampled {len(df):,} rows across {df['ANON_ADMISSION_ID'].nunique():,} patients")
 
-    print("Building fuzzy LUTs (sharper SBP)…")
+    print("Building fuzzy LUTs (five-set SBP)…")
     luts = {v: es.build_lut(v) for v in VITALS}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     pv = es.apply_luts(df, luts, VITALS)
     pv["inspired_oxygen"] = df["O2_CONCERN"].values.astype(np.float32)

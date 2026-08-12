@@ -1,5 +1,4 @@
 import altair as alt
-import ast
 import math
 import pandas as pd
 import streamlit as st
@@ -12,26 +11,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR_DEFAULT = REPO_ROOT / "membership_functions" / "original"
 DATA_DIR_SIGMOID = REPO_ROOT / "membership_functions" / "sigmoid"
 # NOTE: Generated trapezoidal outputs have been removed; only sigmoid generation is supported.
-PART2_SURVEY_PATH = REPO_ROOT / "membership_functions" / "original" / "part2_raw.xlsx"
-
-PART2_COMBINATIONS = {
-    1: {"hr": 110, "bp": 130, "resp": 18, "temp": 36.8, "ox": 98},
-    2: {"hr": 75, "bp": 95, "resp": 18, "temp": 36.8, "ox": 98},
-    3: {"hr": 75, "bp": 130, "resp": 24, "temp": 36.8, "ox": 98},
-    4: {"hr": 75, "bp": 130, "resp": 18, "temp": 38.2, "ox": 98},
-    5: {"hr": 75, "bp": 130, "resp": 18, "temp": 36.8, "ox": 92},
-    6: {"hr": 110, "bp": 95, "resp": 18, "temp": 36.8, "ox": 98},
-    7: {"hr": 110, "bp": 130, "resp": 24, "temp": 36.8, "ox": 98},
-    8: {"hr": 110, "bp": 130, "resp": 18, "temp": 38.2, "ox": 98},
-    9: {"hr": 110, "bp": 130, "resp": 18, "temp": 36.8, "ox": 92},
-    10: {"hr": 75, "bp": 95, "resp": 24, "temp": 36.8, "ox": 98},
-    11: {"hr": 75, "bp": 95, "resp": 18, "temp": 38.2, "ox": 98},
-    12: {"hr": 75, "bp": 95, "resp": 18, "temp": 36.8, "ox": 92},
-    13: {"hr": 75, "bp": 130, "resp": 24, "temp": 38.2, "ox": 98},
-    14: {"hr": 75, "bp": 130, "resp": 24, "temp": 36.8, "ox": 92},
-    15: {"hr": 75, "bp": 130, "resp": 18, "temp": 38.2, "ox": 92},
-}
-
 
 AVPU_OPTIONS = [
     "Alert",
@@ -353,84 +332,6 @@ class custom_mf_sbp_merged:
         df["No concern"] = [self.no_con[k] for k in self.df["Value"].values]
         df["Above normal - severe concern"] = self.df["Above normal - severe concern"].values
         return df
-
-
-@lru_cache(maxsize=1)
-def load_part2_survey_means() -> Dict[int, float]:
-    """Return mean clinician rating per combination from part2 survey data."""
-    if not PART2_SURVEY_PATH.exists():
-        return {}
-    df = pd.read_excel(PART2_SURVEY_PATH)
-    if "part2Data" not in df.columns:
-        return {}
-    ratings: Dict[int, list] = {}
-    for raw in df["part2Data"].dropna():
-        try:
-            entries = ast.literal_eval(raw) if isinstance(raw, str) else raw
-        except Exception:
-            continue
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            try:
-                combo = int(entry.get("Combination"))
-                rating = float(entry.get("Rating"))
-            except Exception:
-                continue
-            ratings.setdefault(combo, []).append(rating)
-    return {combo: float(sum(vals) / len(vals)) for combo, vals in ratings.items() if vals}
-
-
-def _part2_distance(obs: Observation, combo: Dict[str, float]) -> float:
-    """Normalized distance between observation and a part2 combination."""
-    ranges = {
-        "hr": 110 - 75,
-        "bp": 130 - 95,
-        "resp": 24 - 18,
-        "temp": 38.2 - 36.8,
-        "ox": 98 - 92,
-    }
-    dh = (obs.hr - combo["hr"]) / ranges["hr"]
-    db = (obs.bp - combo["bp"]) / ranges["bp"]
-    dr = (obs.resp - combo["resp"]) / ranges["resp"]
-    dt = (obs.temp - combo["temp"]) / ranges["temp"]
-    do = (obs.ox_sats - combo["ox"]) / ranges["ox"]
-    return float((dh * dh + db * db + dr * dr + dt * dt + do * do) ** 0.5)
-
-
-def compute_part2_blend(obs: Observation, k: int = 3) -> Tuple[float | None, list]:
-    """Return weighted mean rating using top-k nearest part2 combinations."""
-    survey_means = load_part2_survey_means()
-    if not survey_means:
-        return None, []
-
-    scored = []
-    for combo_id, combo in PART2_COMBINATIONS.items():
-        if combo_id not in survey_means:
-            continue
-        dist = _part2_distance(obs, combo)
-        scored.append((combo_id, dist, survey_means[combo_id]))
-
-    if not scored:
-        return None, []
-
-    scored.sort(key=lambda item: item[1])
-    top = scored[: max(1, k)]
-    weights = []
-    for _, dist, _ in top:
-        weights.append(1.0 / (dist + 1e-6))
-    weight_sum = sum(weights)
-    blended = sum(w * rating for w, (_, _, rating) in zip(weights, top)) / weight_sum
-    details = [
-        {
-            "Combination": combo_id,
-            "Distance": round(dist, 3),
-            "Weight": round(w / weight_sum, 3),
-            "Mean rating": round(rating, 2),
-        }
-        for (combo_id, dist, rating), w in zip(top, weights)
-    ]
-    return float(blended), details
 
 
 class OutputMF:
@@ -903,22 +804,6 @@ def _render_snapshot_tab(prefix: str) -> None:
     st.caption("Sigmoid membership functions, additive aggregation. Six scored vitals; "
                "ACVPU flags the row but adds no points.")
 
-    use_part2_rules = st.checkbox(
-        "Use clinician survey rules (Part 2)",
-        value=False,
-        help="Overrides the total score with the average clinician rating for matching combinations.",
-        key=f"{prefix}_part2",
-    )
-    part2_k = st.slider(
-        "Part 2 blend neighbors (k)",
-        min_value=1,
-        max_value=5,
-        value=3,
-        help="Number of nearest survey combinations to blend.",
-        disabled=not use_part2_rules,
-        key=f"{prefix}_part2_k",
-    )
-
     presets = {
         "Normal": Observation(hr=80, bp=120, temp=36.8, resp=16, ox_sats=98, insp_ox=21),
         "Mild concern": Observation(hr=105, bp=135, temp=37.8, resp=22, ox_sats=94, insp_ox=28),
@@ -969,25 +854,11 @@ def _render_snapshot_tab(prefix: str) -> None:
         total = scores.pop("total", 0.0)
         news_scores, news_total = calculate_news2(obs)
 
-        survey_mean = None
-        survey_multiplier = None
-        survey_details: list = []
-        if use_part2_rules:
-            survey_mean, survey_details = compute_part2_blend(obs, k=part2_k)
-            if survey_mean is not None:
-                survey_multiplier = 1.0 + (survey_mean / 15.0)
-            else:
-                st.warning("Part 2 survey data unavailable for blending.")
-
         left, right = st.columns([1, 2])
         with left:
-            display_total = min(total * survey_multiplier, 18.0) if survey_multiplier is not None else total
-            st.metric(
-                "Overall score (0-18)",
-                f"{display_total:.2f}",
-                help="Fuzzy total (optionally scaled by Part 2 survey multiplier).",
-            )
-            st.metric("Risk bucket", risk_bucket(display_total))
+            st.metric("Overall score (0-18)", f"{total:.2f}",
+                      help="Sum of the six per-vital concern scores (0-3 each).")
+            st.metric("Risk bucket", risk_bucket(total))
             st.metric(
                 "NEWS-2 (0-17)",
                 f"{news_total}",
@@ -999,11 +870,6 @@ def _render_snapshot_tab(prefix: str) -> None:
             )
             if acvpu_deterioration_flag(obs.avpu):
                 st.metric("ACVPU deterioration flag", "POSITIVE", help="Non-Alert ACVPU: the row is flagged as deteriorating. Nothing is added to the fuzzy total.")
-            if survey_mean is not None:
-                st.metric("Part 2 clinician score (0-15)", f"{survey_mean:.2f}")
-                st.metric("Part 2 multiplier", f"{survey_multiplier:.2f}")
-                with st.expander("Part 2 nearest combinations", expanded=False):
-                    st.dataframe(pd.DataFrame(survey_details), use_container_width=True)
         with right:
             st.write("Per-vital scores")
             combined = []

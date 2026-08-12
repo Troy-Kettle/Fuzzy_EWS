@@ -72,9 +72,8 @@ def main():
     df = load()
     vitals = es.VITALS_BASE
 
-    print("Building fuzzy LUTs (engine, sharper SBP)…")
+    print("Building fuzzy LUTs (engine, five-set SBP)…")
     luts = {v: es.build_lut(v) for v in vitals}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     # Same patient sample as the patient-level grid search
     event_ids = set(df.loc[df["EVENT_FLAG"] == 1, "ANON_ADMISSION_ID"].unique())

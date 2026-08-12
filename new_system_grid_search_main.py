@@ -3,8 +3,8 @@
 "New system" = every fix that has landed since results/main was last generated,
 all applied together:
 
-  • asymmetric SBP membership (sharper_sbp LUT: no-concern band collapses straight
-    into severe concern on the low side, rather than a symmetric ramp)
+  • five-set SBP membership: No concern absorbs above-mild and above-moderate, so the
+    only above-normal set left is severe (engine_scoring._merge_sbp_no_concern)
   • fixed inspired-oxygen signal (INSP_O2_CAT clinical delivery category, not the
     unreliable INSPIRED_O2_TEXT LUT)
   • chronic-respiratory-aware NEWS-2 baseline (Scale 2 SpO2 sub-score wherever
@@ -239,9 +239,8 @@ def main():
     df = load()
     df = attach_chronic_resp(df)
 
-    print("Building fuzzy LUTs (sharper SBP)…", flush=True)
+    print("Building fuzzy LUTs (five-set SBP)…", flush=True)
     luts = {v: es.build_lut(v) for v in VITALS}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     pv = build_pv(df, luts, VITALS)
     gs, ge = es.group_boundaries(df["ANON_ADMISSION_ID"].values)

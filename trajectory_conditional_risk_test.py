@@ -185,7 +185,6 @@ def score_fews(df: pd.DataFrame) -> list[str]:
     # ACVPU is not a scored vital (flag only) — this stays the 6-vital set
     vitals_full = es.VITALS_BASE
     luts = {v: es.build_lut(v) for v in vitals_full}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     pv = es.apply_luts(df, luts, vitals_full)
     pv["inspired_oxygen"] = df["O2_CONCERN"].values.astype(np.float32)
@@ -211,7 +210,7 @@ def score_fews(df: pd.DataFrame) -> list[str]:
         added.append(col)
         print(f"  scored temporal α={alpha} β={beta} γ={gamma}  → {col}")
 
-    print(f"  7 vitals (incl. ACVPU), sharper SBP LUT   ({time.time()-t0:.0f}s)")
+    print(f"  6 vitals, five-set SBP LUT   ({time.time()-t0:.0f}s)")
     return added
 
 

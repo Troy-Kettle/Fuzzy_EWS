@@ -3,7 +3,8 @@
 Companion to new_system_grid_search_main.py — same methodology, run against the
 smaller clinically-annotated dataset instead:
 
-  • asymmetric SBP membership (sharper_sbp LUT)
+  • five-set SBP membership: No concern absorbs above-mild and above-moderate, so the
+    only above-normal set left is severe (engine_scoring._merge_sbp_no_concern)
   • inspired oxygen scored in its RECORDED units: INSPIRED_O2 + INSPIRED_O2_UNITS is
     split into FiO2% and supplementary flow (L/min) with no interconversion, and each
     row goes through the membership function for its own unit — matching
@@ -190,9 +191,8 @@ def main():
     t_total = time.time()
     df = load()
 
-    print("Building fuzzy LUTs (sharper SBP, + supplementary-O2 L/min)…", flush=True)
+    print("Building fuzzy LUTs (five-set SBP, + supplementary-O2 L/min)…", flush=True)
     luts = {v: es.build_lut(v) for v in VITALS + [es.SUPP_O2_LMIN]}
-    luts["blood_pressure"] = es.build_lut("blood_pressure", sharper_sbp=True)
 
     pv = build_pv(df, luts, VITALS)
     gs, ge = es.group_boundaries(df["ANON_ADMISSION_ID"].values)
