@@ -1,0 +1,5 @@
+Value,No concern,Above normal - mild concern,Above normal - moderate concern,Above normal - severe concern
+0,1,0,0,0
+1,0,1,0,0
+2,0,0,1,0
+3,0,0,0,1

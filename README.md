@@ -63,3 +63,8 @@ Key correctness fixes applied over the original baseline:
 - **C1** — sharper SBP membership: hypertension above mild collapses to a single bucket
 - **O2** — inspired O2 scored from `INSP_O2_CAT` (recorded clinical category) instead
   of `INSPIRED_O2_TEXT` which mixed L/min flow rates with FiO2 percentages
+- **O2 (annotated dataset)** — where oxygen is recorded as a value plus a unit
+  (`INSPIRED_O2` + `INSPIRED_O2_UNITS`), FiO2% and supplementary flow are kept in
+  **separate columns and scored on separate membership functions** — flow via
+  `supplementary_oxygen_lmin_membership_functions.csv`. No L/min→FiO2 conversion is
+  performed; see `engine_scoring.split_inspired_oxygen` / `inspired_oxygen_concern`
