@@ -300,76 +300,6 @@ class custom_mf_3_var_down:
         return out
 
 
-class custom_mf_sbp_sharper:
-    """Asymmetric systolic BP input MF.
-
-    Reads the standard 7-set SBP CSV but exposes a 6-set interface where the
-    ``Above normal - mild concern`` and ``Above normal - moderate concern``
-    sigmoids are summed (and clipped to 1.0) into a single ``Above normal -
-    elevated`` set. Partition of unity is preserved because the merged set
-    is just the sum of two neighbouring sets.
-
-    The companion mapping ``LABEL_TO_CONCERN`` then sends:
-
-        Above normal - elevated        -> Mild concern
-        Above normal - severe concern  -> Severe concern
-
-    Hypotension still maps one-to-one (below severe -> Severe, etc.), so the
-    Moderate concern output bucket is simply never activated from the above
-    side. This encodes the clinical prior that mild and moderate hypertension
-    are qualitatively similar low-urgency states, while a hypertensive crisis
-    is a distinct high-urgency state.
-    """
-
-    LABEL_TO_CONCERN = {
-        "Below normal - severe concern": "Severe concern",
-        "Below normal - moderate concern": "Moderate concern",
-        "Below normal - mild concern": "Mild concern",
-        "No concern": "No concern",
-        "Above normal - elevated": "Mild concern",
-        "Above normal - severe concern": "Severe concern",
-    }
-
-    def __init__(self, path: Path):
-        self.df = pd.read_csv(path)
-        keys = self.df.loc[:, "Value"].values
-        self.B_SevC = dict(zip(keys, self.df.loc[:, "Below normal - severe concern"].values))
-        self.B_ModC = dict(zip(keys, self.df.loc[:, "Below normal - moderate concern"].values))
-        self.B_MildC = dict(zip(keys, self.df.loc[:, "Below normal - mild concern"].values))
-        self.no_con = dict(zip(keys, self.df.loc[:, "No concern"].values))
-        a_mild = self.df.loc[:, "Above normal - mild concern"].values
-        a_mod = self.df.loc[:, "Above normal - moderate concern"].values
-        elevated = [min(1.0, max(0.0, float(m) + float(md))) for m, md in zip(a_mild, a_mod)]
-        self.A_Elev = dict(zip(keys, elevated))
-        self.A_SevC = dict(zip(keys, self.df.loc[:, "Above normal - severe concern"].values))
-        self.fs = [
-            self.B_SevC, self.B_ModC, self.B_MildC, self.no_con,
-            self.A_Elev, self.A_SevC,
-        ]
-        self.labels = list(self.LABEL_TO_CONCERN.keys())
-
-    def __call__(self, inp: float) -> Dict[str, float]:
-        return {label: _interp_lookup(fs, inp) for label, fs in zip(self.labels, self.fs)}
-
-    def chart_df(self) -> pd.DataFrame:
-        df = self.df[[
-            "Value",
-            "Below normal - severe concern",
-            "Below normal - moderate concern",
-            "Below normal - mild concern",
-            "No concern",
-        ]].copy()
-        df["Above normal - elevated"] = [
-            min(1.0, max(0.0, float(m) + float(md)))
-            for m, md in zip(
-                self.df["Above normal - mild concern"].values,
-                self.df["Above normal - moderate concern"].values,
-            )
-        ]
-        df["Above normal - severe concern"] = self.df["Above normal - severe concern"].values
-        return df
-
-
 class custom_mf_sbp_merged:
     """Main-system systolic BP input MF, aligned with NEWS-2 and clinical judgement.
 
@@ -594,16 +524,6 @@ def resolve_o2_scoring(base_dir: Path, unit: str, value: float) -> Tuple[object,
     return load_membership_functions(base_dir)[5], fio2
 
 
-@lru_cache(maxsize=2)
-def _load_sharper_sbp_from(dir_str: str) -> custom_mf_sbp_sharper:
-    base = Path(dir_str)
-    return custom_mf_sbp_sharper(base / "systolic_blood_pressure_membership_functions.csv")
-
-
-def load_sharper_sbp(base_dir: Path) -> custom_mf_sbp_sharper:
-    return _load_sharper_sbp_from(str(base_dir.resolve()))
-
-
 @st.cache_resource(show_spinner=False)
 def output_cache() -> Tuple[OutputMF, Dict[float, Dict[str, float]]]:
     output = OutputMF()
@@ -686,21 +606,6 @@ def defuzz_vital_centroid(concern_levels: Dict[str, float]) -> float:
     return numerator / denominator
 
 
-def calculate_fuzzy_ews_additive(
-    all_firings: Dict[str, Dict[str, float]], avpu: str = "Alert",
-) -> Dict[str, float]:
-    """Pure additive aggregation (no gamma mixing)."""
-    per_vital_scores: Dict[str, float] = {}
-    total = 0.0
-    for vital_name, vital_memberships in all_firings.items():
-        concern_levels = map_to_concern_levels(vital_memberships)
-        score = defuzz_vital_centroid(concern_levels)
-        per_vital_scores[vital_name] = score
-        total += score
-    per_vital_scores["total"] = total
-    return per_vital_scores
-
-
 def aggregate_total(
     scores: Dict[str, float],
     method: str,
@@ -750,73 +655,6 @@ def calculate_fuzzy_ews(
     per_vital_scores: Dict[str, float] = {}
     for vital_name, vital_memberships in all_firings.items():
         concern_levels = map_to_concern_levels(vital_memberships)
-        score = defuzz_vital_centroid(concern_levels)
-        per_vital_scores[vital_name] = score
-    total = aggregate_total(per_vital_scores, method, power=2.0, gamma=gamma)
-    per_vital_scores["total"] = total
-    return per_vital_scores
-
-
-def map_to_concern_levels_sharper_sbp(
-    vital_memberships: Dict[str, float],
-) -> Dict[str, float]:
-    """Label-driven mapping used only for SBP in the asymmetric variant.
-
-    Uses ``custom_mf_sbp_sharper.LABEL_TO_CONCERN`` when the label is known,
-    and falls back to the standard keyword-based mapping otherwise so this
-    function is safe to call on any vital.
-    """
-    mapping = {"No concern": 0.0, "Mild concern": 0.0, "Moderate concern": 0.0, "Severe concern": 0.0}
-    for key, value in vital_memberships.items():
-        concern = custom_mf_sbp_sharper.LABEL_TO_CONCERN.get(key)
-        if concern is None:
-            key_lower = key.lower()
-            if "severe" in key_lower:
-                concern = "Severe concern"
-            elif "moderate" in key_lower:
-                concern = "Moderate concern"
-            elif "mild" in key_lower:
-                concern = "Mild concern"
-            elif "no concern" in key_lower:
-                concern = "No concern"
-        if concern:
-            mapping[concern] = max(mapping[concern], value)
-    return mapping
-
-
-def firings_sharper(
-    hr: int, bp: int, temp: float, resp: float, ox: float, insp: float, base_dir: Path,
-    avpu: str = "Alert", insp_unit: str = O2_UNIT_PCT,   # avpu accepted but NOT scored
-) -> Dict[str, Dict[str, float]]:
-    """Same as firings(), but SBP uses the asymmetric 6-set input MF."""
-    heart_rate, _, temperature, respiratory_rate, oxygen_saturation, _ = load_membership_functions(base_dir)
-    inspired_oxygen, insp = resolve_o2_scoring(base_dir, insp_unit, insp)
-    blood_pressure = load_sharper_sbp(base_dir)
-    return {
-        "heart rate": heart_rate(hr),
-        "blood pressure": blood_pressure(bp),
-        "temperature": temperature(temp),
-        "respiratory rate": respiratory_rate(resp),
-        "oxygen saturation": oxygen_saturation(ox),
-        "inspired oxygen": inspired_oxygen(insp),
-        # ACVPU deliberately absent: it is not a scored vital. Any non-Alert reading is a
-        # deterioration flag (acvpu_deterioration_flag) and adds nothing to the total.
-    }
-
-
-def calculate_fuzzy_ews_sharper(
-    all_firings: Dict[str, Dict[str, float]],
-    method: str,
-    gamma: float = 1.0,
-    avpu: str = "Alert",
-) -> Dict[str, float]:
-    """Per-vital defuzzification that uses the sharper mapping for SBP only."""
-    per_vital_scores: Dict[str, float] = {}
-    for vital_name, vital_memberships in all_firings.items():
-        if vital_name == "blood pressure":
-            concern_levels = map_to_concern_levels_sharper_sbp(vital_memberships)
-        else:
-            concern_levels = map_to_concern_levels(vital_memberships)
         score = defuzz_vital_centroid(concern_levels)
         per_vital_scores[vital_name] = score
     total = aggregate_total(per_vital_scores, method, power=2.0, gamma=gamma)
@@ -1008,6 +846,39 @@ def firing_table_df(labels, firing: Dict[str, float]) -> pd.DataFrame:
     )
 
 
+def render_membership_functions(selected_dir: Path, obs: Observation,
+                                all_firings: Dict[str, Dict[str, float]]) -> None:
+    """Membership-function charts + firing strengths for the six scored vitals.
+
+    Shared by both tabs: the Snapshot tab shows the observation just scored, the Temporal
+    tab shows the most recent observation on the timeline. Inspired oxygen is charted
+    against the set it was actually scored on, which is the flow set when the unit is
+    L/min — not always the FiO2 concentration set.
+    """
+    st.subheader("Membership functions and firing")
+    st.caption("Your input marked in red; firing strengths at that value below each chart.")
+
+    mf = load_membership_functions(selected_dir)
+    lookup = {
+        "heart rate": (mf[0], obs.hr, "bpm"),
+        "blood pressure": (mf[1], obs.bp, "mmHg"),
+        "temperature": (mf[2], obs.temp, "°C"),
+        "respiratory rate": (mf[3], obs.resp, "breaths/min"),
+        "oxygen saturation": (mf[4], obs.ox_sats, "%"),
+        "inspired oxygen": (resolve_o2_scoring(selected_dir, obs.insp_ox_unit, obs.insp_ox)[0],
+                            *o2_display(obs)),
+    }
+    for vital, (model, value, unit) in lookup.items():
+        with st.expander(f"{vital.title()} ({value} {unit})", expanded=False):
+            if vital == "blood pressure":
+                st.caption("NEWS-2-aligned: No concern spans the mild/moderate-elevated "
+                           "range and overlaps Above-severe near the top.")
+            source = model.chart_df() if hasattr(model, "chart_df") else model.df
+            st.altair_chart(membership_chart(source, value, unit), use_container_width=True)
+            st.dataframe(firing_table_df(model.labels, all_firings.get(vital, {})),
+                         use_container_width=True, height=220)
+
+
 def risk_bucket(total: float) -> str:
     if total < 4:
         return "Low"
@@ -1019,477 +890,18 @@ def risk_bucket(total: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Interval Type-2 Fuzzy Logic System  (IT2FLS)
-# ---------------------------------------------------------------------------
-
-def _build_it2_bounds(fs_dict: dict, all_keys: list, spread: int) -> Tuple[dict, dict]:
-    """Create upper (UMF) and lower (LMF) MF dicts with distance-weighted blending.
-
-    Each neighbour's influence decays linearly with distance so that crisp
-    transitions produce bounded FOUs rather than full-width 0-to-1 bands.
-    """
-    if spread == 0:
-        vals = {k: float(fs_dict.get(k, 0.0)) for k in all_keys}
-        return dict(vals), dict(vals)
-
-    n = len(all_keys)
-    t1 = [float(fs_dict.get(all_keys[i], 0.0)) for i in range(n)]
-
-    umf, lmf = {}, {}
-    for i in range(n):
-        lo = max(0, i - spread)
-        hi = min(n - 1, i + spread)
-
-        u_val = t1[i]
-        l_val = t1[i]
-        for j in range(lo, hi + 1):
-            if j == i:
-                continue
-            w = 1.0 - abs(j - i) / (spread + 1.0)
-            blended = t1[i] + w * (t1[j] - t1[i])
-            u_val = max(u_val, blended)
-            l_val = min(l_val, blended)
-
-        umf[all_keys[i]] = min(1.0, u_val)
-        lmf[all_keys[i]] = max(0.0, l_val)
-    return umf, lmf
-
-
-def _spread_for_vital(n_points: int, pct: float) -> int:
-    """Convert a percentage FOU width into an integer spread for a given vital.
-
-    No artificial floor — small-range vitals can legitimately get spread 0
-    (i.e. no FOU) when the percentage is low, avoiding disproportionately
-    wide uncertainty bands on dense or narrow grids.
-    """
-    return round(n_points * pct / 100.0)
-
-
-class IT2_mf_7_var:
-    """IT2 input membership function with 7 categories and FOU."""
-
-    def __init__(self, path: Path, spread_pct: float = 3.0):
-        self.t1 = custom_mf_7_var(path)
-        self.df = self.t1.df
-        self.labels = self.t1.labels
-        keys = list(self.df["Value"].values)
-        self.spread = _spread_for_vital(len(keys), spread_pct)
-        self.umf_fs: list[dict] = []
-        self.lmf_fs: list[dict] = []
-        for fs in self.t1.fs:
-            umf, lmf = _build_it2_bounds(fs, keys, self.spread)
-            self.umf_fs.append(umf)
-            self.lmf_fs.append(lmf)
-
-    def __call__(self, inp: float) -> Dict[str, Tuple[float, float]]:
-        return {
-            label: (_interp_lookup(lmf, inp), _interp_lookup(umf, inp))
-            for label, umf, lmf in zip(self.labels, self.umf_fs, self.lmf_fs)
-        }
-
-
-class IT2_mf_3_var_up:
-    """IT2 input membership function with 3 upward categories and FOU."""
-
-    def __init__(self, path: Path, spread_pct: float = 3.0):
-        self.t1 = custom_mf_3_var_up(path)
-        self.df = self.t1.df
-        self.labels = self.t1.labels
-        keys = list(self.df["Value"].values)
-        self.spread = _spread_for_vital(len(keys), spread_pct)
-        self.umf_fs: list[dict] = []
-        self.lmf_fs: list[dict] = []
-        for fs in self.t1.fs:
-            umf, lmf = _build_it2_bounds(fs, keys, self.spread)
-            self.umf_fs.append(umf)
-            self.lmf_fs.append(lmf)
-
-    def __call__(self, inp: float) -> Dict[str, Tuple[float, float]]:
-        return {
-            label: (_interp_lookup(lmf, inp), _interp_lookup(umf, inp))
-            for label, umf, lmf in zip(self.labels, self.umf_fs, self.lmf_fs)
-        }
-
-
-class IT2_mf_3_var_down:
-    """IT2 input membership function with 3 downward categories and FOU."""
-
-    def __init__(self, path: Path, spread_pct: float = 3.0):
-        self.t1 = custom_mf_3_var_down(path)
-        self.df = self.t1.df
-        self.labels = self.t1.labels
-        keys = list(self.df["Value"].values)
-        self.spread = _spread_for_vital(len(keys), spread_pct)
-        self.umf_fs: list[dict] = []
-        self.lmf_fs: list[dict] = []
-        for fs in self.t1.fs:
-            umf, lmf = _build_it2_bounds(fs, keys, self.spread)
-            self.umf_fs.append(umf)
-            self.lmf_fs.append(lmf)
-
-    def __call__(self, inp: float) -> Dict[str, Tuple[float, float]]:
-        return {
-            label: (_interp_lookup(lmf, inp), _interp_lookup(umf, inp))
-            for label, umf, lmf in zip(self.labels, self.umf_fs, self.lmf_fs)
-        }
-
-
-class IT2OutputMF:
-    """IT2 output membership function with trapezoidal UMF / LMF on the 0-3 scale."""
-
-    _T1_DEFS = {
-        "No concern": (-0.5, 0, 0, 0.75),
-        "Mild concern": (0.25, 1, 1, 1.75),
-        "Moderate concern": (1.25, 2, 2, 2.75),
-        "Severe concern": (2.25, 3, 3, 3.5),
-    }
-
-    def __init__(self, delta: float = 0.15):
-        self.umf_defs: Dict[str, Tuple[float, float, float, float]] = {}
-        self.lmf_defs: Dict[str, Tuple[float, float, float, float]] = {}
-        for k, (a, b, c, d) in self._T1_DEFS.items():
-            self.umf_defs[k] = (a - delta, b - delta, c + delta, d + delta)
-            nb, nc = b + delta, c - delta
-            if nb > nc:
-                nb = nc = (b + c) / 2.0
-            self.lmf_defs[k] = (a + delta, nb, nc, d - delta)
-
-    @staticmethod
-    def _trap(x: float, a: float, b: float, c: float, d: float) -> float:
-        if b <= x <= c:
-            return 1.0
-        if x <= a or x >= d:
-            return 0.0
-        if a < x < b:
-            return (x - a) / (b - a)
-        if c < x < d:
-            return (d - x) / (d - c)
-        return 0.0
-
-    def __call__(self, x: float) -> Dict[str, Tuple[float, float]]:
-        return {
-            label: (self._trap(x, *self.lmf_defs[label]), self._trap(x, *self.umf_defs[label]))
-            for label in self.umf_defs
-        }
-
-
-@st.cache_resource(show_spinner=False)
-def _it2_output_cache() -> Tuple[IT2OutputMF, Dict[float, Dict[str, Tuple[float, float]]]]:
-    it2_out = IT2OutputMF()
-    cache: Dict[float, Dict[str, Tuple[float, float]]] = {}
-    for i in range(301):
-        x = i / 100.0
-        cache[x] = it2_out(x)
-    return it2_out, cache
-
-
-def km_type_reduce(
-    x_points: list, lower_weights: list, upper_weights: list,
-) -> Tuple[float, float]:
-    """Karnik-Mendel centroid type-reduction.  Returns (y_l, y_r)."""
-    n = len(x_points)
-    if n == 0 or max(upper_weights) == 0:
-        return 0.0, 0.0
-
-    # y_l  –  minimise the centroid
-    theta = [(l + u) / 2.0 for l, u in zip(lower_weights, upper_weights)]
-    y_l = 0.0
-    for _ in range(50):
-        den = sum(theta)
-        if den == 0:
-            y_l = 0.0
-            break
-        y_l = sum(x * t for x, t in zip(x_points, theta)) / den
-        new_theta = [
-            upper_weights[i] if x_points[i] <= y_l else lower_weights[i]
-            for i in range(n)
-        ]
-        if new_theta == theta:
-            break
-        theta = new_theta
-    else:
-        den = sum(theta)
-        if den > 0:
-            y_l = sum(x * t for x, t in zip(x_points, theta)) / den
-
-    # y_r  –  maximise the centroid
-    theta = [(l + u) / 2.0 for l, u in zip(lower_weights, upper_weights)]
-    y_r = 0.0
-    for _ in range(50):
-        den = sum(theta)
-        if den == 0:
-            y_r = 0.0
-            break
-        y_r = sum(x * t for x, t in zip(x_points, theta)) / den
-        new_theta = [
-            lower_weights[i] if x_points[i] <= y_r else upper_weights[i]
-            for i in range(n)
-        ]
-        if new_theta == theta:
-            break
-        theta = new_theta
-    else:
-        den = sum(theta)
-        if den > 0:
-            y_r = sum(x * t for x, t in zip(x_points, theta)) / den
-
-    return y_l, y_r
-
-
-@lru_cache(maxsize=8)
-def _load_it2_membership_functions_from(dir_str: str, spread_pct: float):
-    base = Path(dir_str)
-    return (
-        IT2_mf_7_var(base / "heart_rate_membership_functions.csv", spread_pct),
-        IT2_mf_7_var(base / "systolic_blood_pressure_membership_functions.csv", spread_pct),
-        IT2_mf_7_var(base / "temperature_membership_functions.csv", spread_pct),
-        IT2_mf_7_var(base / "respiratory_rate_membership_functions.csv", spread_pct),
-        IT2_mf_3_var_down(base / "oxygen_saturation_membership_functions.csv", spread_pct),
-        IT2_mf_3_var_up(base / "inspired_oxygen_concentration_membership_functions.csv", spread_pct),
-    )
-
-
-def load_it2_membership_functions(base_dir: Path, spread_pct: float = 3.0):
-    return _load_it2_membership_functions_from(str(base_dir.resolve()), spread_pct)
-
-
-@lru_cache(maxsize=8)
-def _load_it2_supp_o2_from(dir_str: str, spread_pct: float):
-    return IT2_mf_3_var_up(
-        Path(dir_str) / "supplementary_oxygen_lmin_membership_functions.csv", spread_pct)
-
-
-def it2_inspired_oxygen_mf(base_dir: Path, unit: str, spread_pct: float = 3.0):
-    """IT2 counterpart of ``inspired_oxygen_mf`` — the set matching ``unit``."""
-    if unit == O2_UNIT_LMIN:
-        return _load_it2_supp_o2_from(str(base_dir.resolve()), spread_pct)
-    return load_it2_membership_functions(base_dir, spread_pct)[5]
-
-
-def it2_resolve_o2_scoring(base_dir: Path, unit: str, value: float,
-                           spread_pct: float = 3.0) -> Tuple[object, float]:
-    """IT2 counterpart of ``resolve_o2_scoring`` — same room-air rule for 0 L/min."""
-    if unit == O2_UNIT_LMIN and value > 0:
-        return _load_it2_supp_o2_from(str(base_dir.resolve()), spread_pct), float(value)
-    fio2 = float(value) if unit == O2_UNIT_PCT else 21.0
-    return load_it2_membership_functions(base_dir, spread_pct)[5], fio2
-
-
-def firings_it2(
-    hr: int, bp: int, temp: float, resp: float, ox: float, insp: float,
-    base_dir: Path, spread_pct: float = 3.0, insp_unit: str = O2_UNIT_PCT,
-) -> Dict[str, Dict[str, Tuple[float, float]]]:
-    models = load_it2_membership_functions(base_dir, spread_pct)
-    heart_rate, blood_pressure, temperature, respiratory_rate, oxygen_saturation, _ = models
-    inspired_oxygen, insp = it2_resolve_o2_scoring(base_dir, insp_unit, insp, spread_pct)
-    return {
-        "heart rate": heart_rate(hr),
-        "blood pressure": blood_pressure(bp),
-        "temperature": temperature(temp),
-        "respiratory rate": respiratory_rate(resp),
-        "oxygen saturation": oxygen_saturation(ox),
-        "inspired oxygen": inspired_oxygen(insp),
-    }
-
-
-def map_to_concern_intervals(
-    vital_memberships: Dict[str, Tuple[float, float]],
-) -> Dict[str, Tuple[float, float]]:
-    """Map IT2 vital memberships to concern-level firing intervals."""
-    mapping: Dict[str, Tuple[float, float]] = {
-        "No concern": (0.0, 0.0),
-        "Mild concern": (0.0, 0.0),
-        "Moderate concern": (0.0, 0.0),
-        "Severe concern": (0.0, 0.0),
-    }
-    for key, (lo, hi) in vital_memberships.items():
-        kl = key.lower()
-        if "severe" in kl:
-            target = "Severe concern"
-        elif "moderate" in kl:
-            target = "Moderate concern"
-        elif "mild" in kl:
-            target = "Mild concern"
-        elif "no concern" in kl:
-            target = "No concern"
-        else:
-            continue
-        cur_lo, cur_hi = mapping[target]
-        mapping[target] = (max(cur_lo, lo), max(cur_hi, hi))
-    return mapping
-
-
-def it2_defuzz_vital_centroid(
-    concern_intervals: Dict[str, Tuple[float, float]],
-) -> Tuple[float, float, float]:
-    """KM type-reduce one vital.  Returns (y_l, y_r, defuzzified_score)."""
-    MIN_FIRING = 0.05       # keep in sync with defuzz_vital_centroid
-    intervals: Dict[str, Tuple[float, float]] = {}
-    for level, (lo, hi) in concern_intervals.items():
-        intervals[level] = (lo if lo >= MIN_FIRING else 0.0, hi if hi >= MIN_FIRING else 0.0)
-
-    has_concern = any(
-        level != "No concern" and hi > 0 for level, (_, hi) in intervals.items()
-    )
-    if not has_concern and intervals.get("No concern", (0, 0))[1] > 0:
-        return 0.0, 0.0, 0.0
-
-    _, cache = _it2_output_cache()
-    x_points = [i / 100.0 for i in range(301)]
-    lower_agg: list[float] = []
-    upper_agg: list[float] = []
-    for x in x_points:
-        out_memberships = cache[x]
-        lo_val, hi_val = 0.0, 0.0
-        for level, (f_lo, f_hi) in intervals.items():
-            if f_hi > 0:
-                out_lo, out_hi = out_memberships[level]
-                hi_val = max(hi_val, min(f_hi, out_hi))
-                lo_val = max(lo_val, min(f_lo, out_lo))
-        lower_agg.append(lo_val)
-        upper_agg.append(hi_val)
-
-    y_l, y_r = km_type_reduce(x_points, lower_agg, upper_agg)
-    return y_l, y_r, (y_l + y_r) / 2.0
-
-
-def calculate_it2_fuzzy_ews(
-    all_firings: Dict[str, Dict[str, Tuple[float, float]]],
-    method: str,
-    gamma: float = 1.0,
-    avpu: str = "Alert",
-) -> Tuple[Dict[str, float], Dict[str, Tuple[float, float]]]:
-    """IT2FLS scoring with per-vital type-reduction intervals."""
-    per_vital_scores: Dict[str, float] = {}
-    per_vital_intervals: Dict[str, Tuple[float, float]] = {}
-    for vital_name, vital_memberships in all_firings.items():
-        concern_intervals = map_to_concern_intervals(vital_memberships)
-        y_l, y_r, score = it2_defuzz_vital_centroid(concern_intervals)
-        per_vital_scores[vital_name] = score
-        per_vital_intervals[vital_name] = (y_l, y_r)
-    total = aggregate_total(per_vital_scores, method, power=2.0, gamma=gamma)
-    per_vital_scores["total"] = total
-    return per_vital_scores, per_vital_intervals
-
-
-def it2_interpret_table(
-    all_firings: Dict[str, Dict[str, Tuple[float, float]]],
-    scores: Dict[str, float],
-    intervals: Dict[str, Tuple[float, float]],
-    news_scores: Dict[str, int],
-    obs: Observation,
-) -> pd.DataFrame:
-    records = []
-    vocab = {
-        "heart rate": (obs.hr, "bpm"),
-        "blood pressure": (obs.bp, "mmHg"),
-        "temperature": (obs.temp, "\u00b0C"),
-        "respiratory rate": (obs.resp, "breaths/min"),
-        "oxygen saturation": (obs.ox_sats, "%"),
-        "inspired oxygen": o2_display(obs),
-    }
-    for vital, memberships in all_firings.items():
-        upper_vals = {k: v[1] for k, v in memberships.items()}
-        label, strength = dominant_label(upper_vals)
-        score = scores.get(vital, 0.0)
-        y_l, y_r = intervals.get(vital, (0.0, 0.0))
-        news_score = news_scores.get(vital, 0)
-        value, unit = vocab.get(vital, ("", ""))
-        description = (
-            f"{vital.title()} sits in '{label}' (UMF={strength:.2f}), "
-            f"IT2 interval [{y_l:.2f}, {y_r:.2f}], defuzzified {score:.2f}."
-            if strength > 0
-            else "No activation for this vital."
-        )
-        records.append({
-            "Vital": vital.title(),
-            "Input": f"{value} {unit}".strip(),
-            "Dominant concern": label,
-            "UMF strength": round(strength, 2),
-            "IT2 interval": f"[{y_l:.2f}, {y_r:.2f}]",
-            "Per-vital score (0-3)": round(score, 2),
-            "NEWS-2 score": news_score,
-            "Explanation": description,
-        })
-    return pd.DataFrame(records)
-
-
-def it2_membership_chart(model, value: float, unit: str) -> alt.Chart:
-    """IT2 membership chart with FOU shown as shaded area between UMF and LMF."""
-    keys = list(model.df["Value"].values)
-    records = []
-    for label, umf_fs, lmf_fs in zip(model.labels, model.umf_fs, model.lmf_fs):
-        for k in keys:
-            records.append({
-                "Value": float(k),
-                "Membership": label,
-                "UMF": float(umf_fs.get(k, 0.0)),
-                "LMF": float(lmf_fs.get(k, 0.0)),
-            })
-    df = pd.DataFrame(records)
-    area = (
-        alt.Chart(df)
-        .mark_area(opacity=0.25)
-        .encode(
-            x=alt.X("Value:Q", title=f"Value ({unit})"),
-            y="LMF:Q",
-            y2="UMF:Q",
-            color=alt.Color("Membership:N", legend=alt.Legend(title="Fuzzy set")),
-        )
-    )
-    upper = (
-        alt.Chart(df)
-        .mark_line()
-        .encode(
-            x="Value:Q",
-            y=alt.Y("UMF:Q", title="Membership"),
-            color="Membership:N",
-            tooltip=["Membership:N", "Value:Q", "UMF:Q"],
-        )
-    )
-    lower = (
-        alt.Chart(df)
-        .mark_line(strokeDash=[4, 2])
-        .encode(
-            x="Value:Q",
-            y="LMF:Q",
-            color="Membership:N",
-            tooltip=["Membership:N", "Value:Q", "LMF:Q"],
-        )
-    )
-    rule = (
-        alt.Chart(pd.DataFrame({"Value": [value]}))
-        .mark_rule(color="red")
-        .encode(x="Value:Q")
-    )
-    return (area + upper + lower + rule).properties(height=220)
-
-
-def it2_firing_table_df(
-    labels, firing: Dict[str, Tuple[float, float]],
-) -> pd.DataFrame:
-    return pd.DataFrame([
-        {
-            "Membership": label,
-            "Lower firing": round(firing.get(label, (0.0, 0.0))[0], 3),
-            "Upper firing": round(firing.get(label, (0.0, 0.0))[1], 3),
-        }
-        for label in labels
-    ])
-
-
-# ---------------------------------------------------------------------------
 # Streamlit application
 # ---------------------------------------------------------------------------
 
-def _render_t1_tab(prefix: str) -> None:
-    """Render the full Type-1 FLS interface inside a tab."""
+def _render_snapshot_tab(prefix: str) -> None:
+    """Single-observation ("snapshot") scoring: no timeline, no temporal adjustment."""
     selected_dir = DATA_DIR_SIGMOID
     if not selected_dir.exists():
         st.error(f"Required sigmoid membership set not found at {selected_dir}.")
         return
     aggregation_method = "additive"
-    st.caption("Configuration fixed: Generated sigmoid membership functions + additive aggregation.")
+    st.caption("Sigmoid membership functions, additive aggregation. Six scored vitals; "
+               "ACVPU flags the row but adds no points.")
 
     use_part2_rules = st.checkbox(
         "Use clinician survey rules (Part 2)",
@@ -1516,7 +928,7 @@ def _render_t1_tab(prefix: str) -> None:
 
     preset_name = st.radio("Quick examples", list(presets.keys()), horizontal=True, key=f"{prefix}_preset")
     default_obs = presets[preset_name]
-    st.caption("Select a preset to pre-fill the form; adjust any field before running inference.")
+    st.caption("Presets pre-fill the form; edit any field before running.")
 
     # outside the form on purpose: form-internal changes do not rerun the script
     insp_unit = render_o2_unit(prefix, default_obs, preset_name)
@@ -1604,207 +1016,11 @@ def _render_t1_tab(prefix: str) -> None:
             st.dataframe(pd.DataFrame(combined).set_index("Vital"))
 
         st.subheader("Interpretability table")
-        st.caption("Dominant membership, strength, and contribution for each vital in plain language.")
+        st.caption("Strongest fuzzy set per vital and what it contributes.")
         table = interpret_table(all_firings, scores, news_scores, obs)
         st.dataframe(table, use_container_width=True)
 
-        st.subheader("Membership functions and firing")
-        st.caption("Fuzzy sets for each vital from the CSVs, your input marked in red, and the firing strengths at that value.")
-
-        mf_models = load_membership_functions(selected_dir)
-        mf_lookup = {
-            "heart rate": (mf_models[0], obs.hr, "bpm"),
-            "blood pressure": (mf_models[1], obs.bp, "mmHg"),
-            "temperature": (mf_models[2], obs.temp, "\u00b0C"),
-            "respiratory rate": (mf_models[3], obs.resp, "breaths/min"),
-            "oxygen saturation": (mf_models[4], obs.ox_sats, "%"),
-            # the set the value was actually scored against, not always the FiO2 one
-            "inspired oxygen": (resolve_o2_scoring(selected_dir, obs.insp_ox_unit, obs.insp_ox)[0],
-                                *o2_display(obs)),
-        }
-
-        for vital, (model, value, unit) in mf_lookup.items():
-            with st.expander(f"{vital.title()} ({value} {unit})", expanded=False):
-                if vital == "blood pressure":
-                    st.caption(
-                        "Aligned with NEWS-2: No concern now spans the old mild/moderate-"
-                        "elevated range too, and overlaps Above-severe near the top."
-                    )
-                chart_source = model.chart_df() if hasattr(model, "chart_df") else model.df
-                st.altair_chart(membership_chart(chart_source, value, unit), use_container_width=True)
-                st.dataframe(
-                    firing_table_df(model.labels, all_firings.get(vital, {})),
-                    use_container_width=True,
-                    height=220,
-                )
-
-
-def _render_it2_tab(prefix: str) -> None:
-    """Render the full Interval Type-2 FLS interface inside a tab."""
-    selected_dir = DATA_DIR_SIGMOID
-    if not selected_dir.exists():
-        st.error(f"Required sigmoid membership set not found at {selected_dir}.")
-        return
-    aggregation_method = "additive"
-    st.caption("Configuration fixed: Generated sigmoid membership functions + additive aggregation.")
-
-    use_part2_rules = st.checkbox(
-        "Use clinician survey rules (Part 2)",
-        value=False,
-        help="Overrides the total score with the average clinician rating for matching combinations.",
-        key=f"{prefix}_part2",
-    )
-    part2_k = st.slider(
-        "Part 2 blend neighbors (k)",
-        min_value=1,
-        max_value=5,
-        value=3,
-        help="Number of nearest survey combinations to blend.",
-        disabled=not use_part2_rules,
-        key=f"{prefix}_part2_k",
-    )
-
-    fou_pct = st.slider(
-        "FOU width (% of range)",
-        min_value=1.0,
-        max_value=15.0,
-        value=3.0,
-        step=0.5,
-        help=(
-            "Footprint of Uncertainty width as a percentage of each vital's data range. "
-            "The integer spread (in grid steps) is computed per-vital so that "
-            "dense grids like temperature get a proportionally smaller spread."
-        ),
-        key=f"{prefix}_fou",
-    )
-
-    presets = {
-        "Normal": Observation(hr=80, bp=120, temp=36.8, resp=16, ox_sats=98, insp_ox=21),
-        "Mild concern": Observation(hr=105, bp=135, temp=37.8, resp=22, ox_sats=94, insp_ox=28),
-        "Moderate concern": Observation(hr=120, bp=100, temp=38.5, resp=26, ox_sats=91, insp_ox=30),
-        "Severe concern": Observation(hr=135, bp=88, temp=39.2, resp=30, ox_sats=86, insp_ox=60),
-    }
-
-    preset_name = st.radio("Quick examples", list(presets.keys()), horizontal=True, key=f"{prefix}_preset")
-    default_obs = presets[preset_name]
-    st.caption("Select a preset to pre-fill the form; adjust any field before running inference.")
-
-    # outside the form on purpose: form-internal changes do not rerun the script
-    insp_unit = render_o2_unit(prefix, default_obs, preset_name)
-    with st.form(f"{prefix}_inputs"):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            hr = st.number_input("Heart rate (bpm)", min_value=30, max_value=200, value=default_obs.hr)
-            bp = st.number_input("Systolic BP (mmHg)", min_value=50, max_value=220, value=default_obs.bp)
-        with col2:
-            temp = st.number_input("Temperature (\u00b0C)", min_value=30.0, max_value=43.0, value=default_obs.temp, step=0.1, format="%.1f")
-            resp = st.number_input("Respiratory rate (breaths/min)", min_value=4, max_value=50, value=default_obs.resp)
-        with col3:
-            ox = st.number_input("Oxygen saturation (%)", min_value=70, max_value=102, value=default_obs.ox_sats)
-            insp = render_o2_value(prefix, insp_unit)
-            avpu = st.selectbox("AVPU / ACVPU", AVPU_OPTIONS, index=AVPU_OPTIONS.index(default_obs.avpu))
-            chronic_resp = st.checkbox(
-                "Chronic respiratory disease (NEWS-2 Scale 2)",
-                value=bool(default_obs.chronic_resp),
-                help="Uses the 88-92% SpO2 target range (e.g. COPD) instead of the standard 96-98%.",
-            )
-        submitted = st.form_submit_button("Run inference", use_container_width=True)
-
-    if submitted:
-        raw_obs = Observation(hr=int(hr), bp=int(bp), temp=float(temp), resp=int(resp), ox_sats=int(ox),
-                              insp_ox=float(insp), avpu=avpu, chronic_resp=int(chronic_resp),
-                              insp_ox_unit=insp_unit)
-        obs = clamp_observation(raw_obs, selected_dir)
-        if obs != raw_obs:
-            st.info("Inputs were clamped to the membership function range used in the model.")
-
-        it2_all = firings_it2(
-            obs.hr, obs.bp, obs.temp, obs.resp, obs.ox_sats, obs.insp_ox,
-            selected_dir, fou_pct, insp_unit=obs.insp_ox_unit,
-        )
-        it2_scores, it2_intervals = calculate_it2_fuzzy_ews(it2_all, aggregation_method, avpu=obs.avpu)
-        it2_total = it2_scores.pop("total", 0.0)
-        news_scores, news_total = calculate_news2(obs)
-
-        survey_mean = None
-        survey_multiplier = None
-        survey_details: list = []
-        if use_part2_rules:
-            survey_mean, survey_details = compute_part2_blend(obs, k=part2_k)
-            if survey_mean is not None:
-                survey_multiplier = 1.0 + (survey_mean / 15.0)
-            else:
-                st.warning("Part 2 survey data unavailable for blending.")
-
-        left, right = st.columns([1, 2])
-        with left:
-            it2_display = min(it2_total * survey_multiplier, 18.0) if survey_multiplier is not None else it2_total
-            st.metric(
-                "Overall score (0-18)",
-                f"{it2_display:.2f}",
-                help="IT2FLS total (optionally scaled by Part 2 survey multiplier).",
-            )
-            st.metric("Risk bucket", risk_bucket(it2_display))
-            st.metric(
-                "NEWS-2 (0-17)",
-                f"{news_total}",
-                help=(
-                    f"Computed with NEWS-2 {'Scale 2 (chronic resp)' if obs.chronic_resp else 'Scale 1'}; "
-                    "supplemental O2 adds 2 for FiO2 > 21% or any positive L/min flow; "
-                    "ACVPU contributes no consciousness points to either system."
-                ),
-            )
-            if acvpu_deterioration_flag(obs.avpu):
-                st.metric("ACVPU deterioration flag", "POSITIVE", help="Non-Alert ACVPU: the row is flagged as deteriorating. Nothing is added to the fuzzy total.")
-            if survey_mean is not None:
-                st.metric("Part 2 clinician score (0-15)", f"{survey_mean:.2f}")
-                st.metric("Part 2 multiplier", f"{survey_multiplier:.2f}")
-                with st.expander("Part 2 nearest combinations", expanded=False):
-                    st.dataframe(pd.DataFrame(survey_details), use_container_width=True)
-        with right:
-            st.write("Per-vital scores")
-            combined = []
-            for k, v in it2_scores.items():
-                y_l, y_r = it2_intervals.get(k, (0.0, 0.0))
-                combined.append({
-                    "Vital": k.title(),
-                    "IT2 Fuzzy (0-3)": round(v, 2),
-                    "Interval": f"[{y_l:.2f}, {y_r:.2f}]",
-                    "NEWS-2": news_scores.get(k, 0),
-                })
-            st.dataframe(pd.DataFrame(combined).set_index("Vital"))
-
-        st.subheader("Interpretability table")
-        st.caption("Dominant membership (UMF), type-reduced interval, and contribution for each vital.")
-        it2_table = it2_interpret_table(it2_all, it2_scores, it2_intervals, news_scores, obs)
-        st.dataframe(it2_table, use_container_width=True)
-
-        st.subheader("Membership functions and firing (IT2)")
-        st.caption(
-            "Shaded regions show the Footprint of Uncertainty (FOU). "
-            "Solid lines = UMF, dashed lines = LMF. Input marked in red."
-        )
-
-        it2_models = load_it2_membership_functions(selected_dir, fou_pct)
-        it2_mf_lookup = {
-            "heart rate": (it2_models[0], obs.hr, "bpm"),
-            "blood pressure": (it2_models[1], obs.bp, "mmHg"),
-            "temperature": (it2_models[2], obs.temp, "\u00b0C"),
-            "respiratory rate": (it2_models[3], obs.resp, "breaths/min"),
-            "oxygen saturation": (it2_models[4], obs.ox_sats, "%"),
-            "inspired oxygen": (it2_resolve_o2_scoring(selected_dir, obs.insp_ox_unit,
-                                                       obs.insp_ox, fou_pct)[0],
-                                *o2_display(obs)),
-        }
-
-        for vital, (model, value, unit) in it2_mf_lookup.items():
-            with st.expander(f"{vital.title()} ({value} {unit})", expanded=False):
-                st.altair_chart(it2_membership_chart(model, value, unit), use_container_width=True)
-                st.dataframe(
-                    it2_firing_table_df(model.labels, it2_all.get(vital, {})),
-                    use_container_width=True,
-                    height=220,
-                )
+        render_membership_functions(selected_dir, obs, all_firings)
 
 
 # ---------------------------------------------------------------------------
@@ -1978,40 +1194,13 @@ def _compute_temporal_adjusted_scores(
     return results
 
 
-def _render_temporal_tab(prefix: str, scoring_variant: str = "standard") -> None:
-    """Two-step temporal adjustment: EWMA smoothing + worsening-trend factor.
-
-    scoring_variant:
-        "standard"     - symmetric per-vital mapping (same as tabs 1 and 2).
-        "sharper_sbp"  - systolic BP uses an asymmetric mapping: above-mild and
-                         above-moderate collapse into a single "elevated" set
-                         capped at Mild concern, while above-severe maps to
-                         Severe concern. Encodes the clinical prior that
-                         sustained hypertension is rarely the proximate cause
-                         of short-term deterioration, but a hypertensive
-                         crisis is. Hypotension and every other vital are
-                         unchanged.
-    """
-    if scoring_variant == "sharper_sbp":
-        firings_fn = firings_sharper
-        calc_fn = calculate_fuzzy_ews_sharper
-        st.caption(
-            "**Asymmetric SBP variant.** Same temporal logic as the previous tab, "
-            "but systolic BP uses a clinically-asymmetric mapping: above-mild and "
-            "above-moderate collapse into a single 'elevated' set capped at Mild "
-            "concern, while above-severe still maps to Severe concern. Hypotension "
-            "and every other vital are unchanged."
-        )
-    else:
-        firings_fn = firings
-        calc_fn = calculate_fuzzy_ews
+def _render_temporal_tab(prefix: str) -> None:
+    """EWMA smoothing + worsening-trend factor over a timeline of observations."""
+    firings_fn, calc_fn = firings, calculate_fuzzy_ews
     st.caption(
-        "Add sequential observations to build a timeline. Each of the six vitals' "
-        "concern scores (0\u20133) is smoothed with an exponentially weighted moving "
-        "average (EWMA), then adjusted upward if the *raw* score is on a worsening "
-        "trend. Improving or stable trends produce no adjustment. Inspired oxygen is "
-        "included, scored on the membership function for whichever unit you record. "
-        "ACVPU is not scored at all \u2014 any non-Alert reading flags the row instead."
+        "Build a timeline of observations. Each vital's concern score is smoothed (EWMA), "
+        "then pushed up if it is on a worsening trend \u2014 never down. All six vitals, "
+        "oxygen included; ACVPU only flags the row."
     )
 
     selected_dir = DATA_DIR_SIGMOID
@@ -2113,85 +1302,23 @@ def _render_temporal_tab(prefix: str, scoring_variant: str = "standard") -> None
     # ------------------------------------------------------------------
     # Method explanation
     # ------------------------------------------------------------------
-    with st.expander("How the two-step temporal adjustment works", expanded=False):
+    with st.expander("How the temporal adjustment works", expanded=False):
         st.markdown(
-            "**Step 1 \u2014 EWMA smoothing**\n\n"
-            "The exponentially weighted moving average of each vital\u2019s concern "
-            "score (0\u20133) captures the \u201cmemory\u201d of the vital sign, including any "
-            "recent instability or values that were worse than the current one.\n\n"
-            r"$$\text{EWMA}_t = \alpha \cdot x_t + (1 - \alpha) \cdot \text{EWMA}_{t-1}$$"
+            "**1 \u2014 EWMA** smooths each vital's concern score, keeping memory of worse "
+            "past readings:\n\n"
+            r"$$\text{EWMA}_t = \alpha x_t + (1-\alpha)\text{EWMA}_{t-1}$$"
+            "\n\n**2 \u2014 Trend** fits a slope *s* to the **raw** scores over the look-back "
+            "window. It only counts as worsening if *s* clears the dead zone, and (if enabled) "
+            "did so on the previous reading too \u2014 one blip is not a trend:\n\n"
+            r"$$f = \frac{2}{1+e^{-\beta(s-s_{\min})}} - 1$$"
             "\n\n"
-            "**Step 2 \u2014 Worsening-trend factor**\n\n"
-            "A linear trend (slope *s*) is fitted to the **raw** concern scores "
-            "(not the EWMA scores) over the look-back window. Two gates must both pass "
-            "before it counts as \u201cworsening\u201d \u2014 without them, a single noisy uptick "
-            "used to saturate the sigmoid and inflate normal-looking patients:\n\n"
-            "* **Dead zone**: *s* must exceed a minimum slope (pts/hr) \u2014 tiny wobble is ignored.\n"
-            "* **Persistence**: with the checkbox on, the *previous* reading's own slope must "
-            "also have cleared that minimum \u2014 one blip isn't enough, the rise must hold "
-            "across two consecutive observations.\n\n"
-            "Only when both pass does the sigmoid trend factor *f* apply:\n\n"
-            r"$$f = \frac{2}{1 + e^{-\beta \cdot (s - s_{\min})}} - 1 \quad \text{(only when gated } s > s_{\min}\text{)}$$"
-            "\n\n"
-            "The adjusted per-vital score is then:\n\n"
-            r"$$\text{adjusted} = \max(\text{EWMA}, x_{\text{latest}}) + f \times (3 - \max(\text{EWMA}, x_{\text{latest}}))$$"
-            "\n\n"
-            "This guarantees the result stays in [0, 3] and never falls below the latest snapshot."
-            " Improving/stable trends, or trends that fail either gate, produce no adjustment \u2014 "
-            "the clamped EWMA value is used as-is.\n\n"
-            "The EWMA and trend-adjusted **overall totals** are likewise clamped upward to the "
-            "latest snapshot total, so alpha cannot reduce the headline concern score.\n\n"
-            "**Gamma (\u03b3) \u2014 single-vital dominance in totals**\n\n"
-            "When totals are formed from per-vital scores in the temporal builder, gamma controls how "
-            "much a single extremely abnormal vital can dominate the overall fuzzy total:\n\n"
-            r"$$\text{total} = (1 - \gamma) \cdot \text{max\_vital\_based} + \gamma \cdot \text{additive\_total}$$"
-            "\n\n"
-            "Here, *additive_total* is the approximately additive sum across vitals, and "
-            "*max_vital_based* scales the worst per-vital score so that one vital at 3/3 can, in "
-            "principle, reach the maximum overall score. \u03b3 = 1.0 recovers the original additive "
-            "behaviour, while \u03b3 = 0.0 makes the total driven purely by the worst single vital."
+            r"$$\text{adjusted} = b + f\,(3-b), \quad b = \max(\text{EWMA},\, x_{\text{latest}})$$"
+            "\n\nSo the result stays in [0, 3] and never drops below the latest snapshot. "
+            "Improving or stable trends give *f* = 0.\n\n"
+            "**\u03b3** mixes additive and worst-vital totals; \u03b3 = 1 is purely additive, "
+            "\u03b3 = 0 is driven by the single worst vital:\n\n"
+            r"$$\text{total} = (1-\gamma)\,n\max_i v_i + \gamma \sum_i v_i$$"
         )
-
-    if scoring_variant == "sharper_sbp":
-        with st.expander("Asymmetric systolic BP membership function", expanded=True):
-            st.markdown(
-                "*Separate from the main system's NEWS-2-aligned SBP set (which merges "
-                "mild/moderate-above into No concern) — this tab keeps hypertension as its "
-                "own graded concern instead of folding it away.*\n\n"
-                "In this tab, SBP uses a 6-set input rather than the symmetric 7-set model. "
-                "The **above-mild** and **above-moderate** sigmoids are summed (clipped to 1.0) "
-                "into a single **Above normal - elevated** set. The mapping to output concern "
-                "levels is then:\n\n"
-                "* Below severe \u2192 **Severe concern**\n"
-                "* Below moderate \u2192 **Moderate concern**\n"
-                "* Below mild \u2192 **Mild concern**\n"
-                "* No concern \u2192 **No concern**\n"
-                "* Above elevated \u2192 **Mild concern** *(capped)*\n"
-                "* Above severe \u2192 **Severe concern**\n\n"
-                "So the Moderate output bucket is only reachable from hypotension \u2014 "
-                "hypertension can contribute at most ~1/3 to the per-vital score until it "
-                "becomes a true crisis, at which point it climbs smoothly toward 3/3."
-            )
-            sharper_bp = load_sharper_sbp(selected_dir)
-            timeline_snapshot = st.session_state.get(timeline_key, [])
-            latest_bp = float(timeline_snapshot[-1]["blood_pressure"]) if timeline_snapshot else 120.0
-            st.altair_chart(
-                membership_chart(sharper_bp.chart_df(), latest_bp, "mmHg"),
-                use_container_width=True,
-            )
-            if timeline_snapshot:
-                st.caption(
-                    f"Red line = most recent observation ({int(latest_bp)} mmHg). "
-                    "Compare the above side to tabs 1\u20133 to see the collapse."
-                )
-            else:
-                st.caption("Red line = reference at 120 mmHg. Add observations to shift it.")
-            mapping_rows = [
-                {"Input set": label, "Output concern level": concern}
-                for label, concern in custom_mf_sbp_sharper.LABEL_TO_CONCERN.items()
-            ]
-            st.markdown("**Input set \u2192 output concern mapping**")
-            st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
 
     # ------------------------------------------------------------------
     # Add observation
@@ -2431,10 +1558,7 @@ def _render_temporal_tab(prefix: str, scoring_variant: str = "standard") -> None
     # Per-vital detail table
     # ------------------------------------------------------------------
     st.subheader("Per-vital temporal detail")
-    st.caption(
-        "Step 1: EWMA captures memory of past concern scores. "
-        "Step 2: positive raw-score trends push the adjusted score upward via a sigmoid."
-    )
+    st.caption("EWMA = memory of past scores. Trend factor = how hard a worsening slope pushes up.")
     detail_rows = []
     for vital in _PV_KEYS:
         r = temporal_results.get(vital, {})
@@ -2459,6 +1583,29 @@ def _render_temporal_tab(prefix: str, scoring_variant: str = "standard") -> None
             "Obs (window)": r.get("n_trend_obs", 0),
         })
     st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
+    # ------------------------------------------------------------------
+    # Membership functions for the most recent observation
+    # ------------------------------------------------------------------
+    latest = timeline[-1]
+    latest_obs = Observation(
+        hr=int(latest["model_heart_rate"]),
+        bp=int(latest["model_blood_pressure"]),
+        temp=float(latest["model_temperature"]),
+        resp=float(latest["model_respiratory_rate"]),
+        ox_sats=float(latest["model_oxygen_saturation"]),
+        insp_ox=float(latest["model_inspired_oxygen"]),
+        avpu=latest.get("avpu", "Alert"),
+        chronic_resp=latest.get("chronic_resp", 0),
+        insp_ox_unit=latest.get("inspired_oxygen_unit", O2_UNIT_PCT),
+    )
+    render_membership_functions(
+        selected_dir, latest_obs,
+        firings_fn(latest_obs.hr, latest_obs.bp, latest_obs.temp, latest_obs.resp,
+                   latest_obs.ox_sats, latest_obs.insp_ox, selected_dir,
+                   avpu=latest_obs.avpu, insp_unit=latest_obs.insp_ox_unit),
+    )
+    st.caption(f"Showing observation {latest['idx']} (the most recent).")
 
     # ------------------------------------------------------------------
     # EWMA trend visualisation
@@ -2560,24 +1707,13 @@ def main() -> None:
     st.set_page_config(page_title="Fuzzy EWS", page_icon="\U0001fa7a", layout="wide")
     st.title("Fuzzy Early Warning Score (EWS)")
 
-    tab_t1, tab_it2, tab_temporal, tab_sharper = st.tabs([
-        "Type-1 FLS",
-        "Interval Type-2 FLS",
-        "Temporal Context Builder",
-        "Temporal (Asymmetric SBP)",
-    ])
+    tab_snapshot, tab_temporal = st.tabs(["Snapshot", "Temporal"])
 
-    with tab_t1:
-        _render_t1_tab("t1")
-
-    with tab_it2:
-        _render_it2_tab("it2")
+    with tab_snapshot:
+        _render_snapshot_tab("t1")
 
     with tab_temporal:
         _render_temporal_tab("temporal")
-
-    with tab_sharper:
-        _render_temporal_tab("temporal_sharper", scoring_variant="sharper_sbp")
 
 
 try:
