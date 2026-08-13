@@ -1,4 +1,9 @@
-"""Grid search over α / β / γ for the NEW system, annotated dataset, event target.
+"""Grid search over α / β / γ — annotated dataset, event within FOUR hours.
+
+NOTE the label window: this dataset's only outcome column is
+4_HOURS_FROM_ANNOTATED_EVENT, so "event" here means within 4 h of a
+clinician-annotated deterioration event. The main-dataset grid search uses a 24 h
+window from derived labels, so the two runs' numbers must not be compared directly.
 
 Companion to grid_search_main.py — same methodology, run against the
 smaller clinically-annotated dataset instead:
@@ -63,7 +68,11 @@ TEMPORAL_VITALS = es.TEMPORAL_VITALS_DEFAULT   # canonical set (incl. inspired_o
 # defined once in engine_scoring so the app and the pipeline cannot drift apart again.
 
 TARGETS = ["event"]
-TARGET_LABEL = {"event": "Event within 24h (annotated)"}
+# The annotated dataset's only event column is 4_HOURS_FROM_ANNOTATED_EVENT — a
+# FOUR-hour window, not the 24 h used on the main dataset. Label it accordingly:
+# these two datasets are not answering the same question and their metrics are not
+# directly comparable.
+TARGET_LABEL = {"event": "Event within 4h (annotated)"}
 METRICS = ["auroc", "auprc"]
 METRIC_LABEL = {"auroc": "AUROC", "auprc": "AUPRC"}
 
