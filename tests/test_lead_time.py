@@ -1,4 +1,4 @@
-"""Tests for the backward-from-the-event lead-time machinery in main_pipeline_common.
+"""Tests for the backward-from-the-event lead-time machinery in pipeline/common.py.
 
 The behaviour these lock down is the change from the previous lead-time definition:
 lead is measured to the *true event time* (not the start of the 24 h label window) and
@@ -13,10 +13,10 @@ import pandas as pd
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "pipeline"))
 sys.path.insert(0, str(REPO / "engine"))
 
-import main_pipeline_common as C          # noqa: E402
+import common as C                        # noqa: E402  (pipeline/common.py)
 import engine_scoring as es               # noqa: E402
 from stats import delong_auc_ci           # noqa: E402
 

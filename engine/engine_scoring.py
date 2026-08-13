@@ -6,12 +6,10 @@ This deliberately reproduces the CANONICAL engine logic in
 fuzzy_system/streamlit_app.py (defuzz centroid + aggregate_total + five-set SBP),
 but vectorised via per-vital lookup tables so it is fast over millions of rows.
 
-Single source of truth (A3): ``grid_search_excess_patient.py``,
-``auroc_target_comparison_patient.py`` and ``trajectory_auroc_patient.py`` all now
-call ``temporal_score`` / ``snapshot_score`` here rather than carrying their own
-copies (earlier they each inlined the temporal maths — that divergence is removed,
-and ``tests/test_engine_scoring.py`` locks the engine against regression). The
-categorical-exclusion rule lives here via the ``temporal_vitals`` argument.
+Single source of truth (A3): every script under ``pipeline/`` calls ``temporal_score`` /
+``snapshot_score`` here rather than carrying its own copy, and ``pipeline/common.py``
+holds the shared grid, cohort and loader so those cannot drift either.
+``tests/test_engine_scoring.py`` locks this module against regression.
 
 Key corrections vs the earlier analysis scripts:
   A1  defuzz returns EXACTLY 0 when only "No concern" fires (streamlit_app.py:454-458),

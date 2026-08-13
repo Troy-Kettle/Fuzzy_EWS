@@ -28,10 +28,10 @@ observation with:
 
 Temporal parameters: alpha=0.7 (fixed per request), beta/gamma taken from the
 most recent row-level AUPRC-optimal grid search for this dataset
-(results/current/grid_search_rowlevel_auprc/grid_results_rowlevel_auprc.csv,
+(results/main_dataset/row-level/grid_search/grid_results.csv,
 best row by auprc_event: alpha=0.1, beta=0.5, gamma=0.9 — alpha overridden).
 
-Run:  python3 build_scored_sample_spreadsheet.py
+Run:  python3 pipeline/build_scored_spreadsheet_main.py
 """
 import sys, time
 from pathlib import Path
@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "engine"))
 import engine_scoring as es
 
@@ -51,7 +51,7 @@ N_ROWS      = 500_000
 RANDOM_SEED = 42
 
 # AUPRC-optimal temporal parameters for this dataset (row-level grid search,
-# results/current/grid_search_rowlevel_auprc/grid_results_rowlevel_auprc.csv,
+# results/main_dataset/row-level/grid_search/grid_results.csv,
 # best row by auprc_event). alpha is overridden to 0.7 per request.
 ALPHA, BETA, GAMMA = 0.7, 0.5, 0.9
 

@@ -3,11 +3,11 @@ ROW-LEVEL (per-observation) one-at-a-time sensitivity for α, β, γ.
 
 Each parameter is varied over its full grid while the other two are held at the
 baseline configuration (the best event point from the patient-level grid search
-in results/current/grid_search/grid_results.csv):
+in results/main_dataset/patient level/grid_search/grid_results.csv):
 
     α = 0.1   β = 1.0   γ = 1.0
 
-Unlike grid_search_excess_patient.py, metrics are computed on the raw
+Unlike pipeline/grid_search_main.py, metrics are computed on the raw
 observation scores — no per-patient peak reduction — so each row of the dataset
 is one sample. Data loading, LUTs, O2 override, patient sampling and the
 EWMA + sigmoid-trend scoring path (matching app/streamlit_app.py) are identical
@@ -16,7 +16,7 @@ to that script.
 Primary metric is AUPRC (average precision); AUROC is reported alongside since
 row-level positives are rare and AUPRC is prevalence-dependent.
 
-Output → results/current/grid_search/row_level_oat_sensitivity.csv
+Output → results/sensitivity_one_at_a_time/sensitivity_one_at_a_time.csv
 """
 
 import sys, time, warnings
@@ -26,11 +26,15 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "engine"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import engine_scoring as es
 
-from grid_search_excess_patient import (
+# Everything shared lives in pipeline/common.py — the grid, the cohort constants, the
+# loader and the per-vital scoring. (Previously imported from grid_search_excess_patient,
+# which was one of five overlapping grid-search scripts and has been removed.)
+from common import (
     ALPHA_VALS, BETA_VALS, GAMMA_VALS, TEMPORAL_VITALS,
     NE_PATIENTS, RANDOM_SEED, load, build_pv,
 )
@@ -38,9 +42,9 @@ from grid_search_excess_patient import (
 warnings.filterwarnings("ignore")
 np.seterr(over="ignore", invalid="ignore")
 
-OUT_DIR = REPO / "results" / "24thJuly" / "grid_search"
+OUT_DIR = REPO / "results" / "sensitivity_one_at_a_time"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-OUT_CSV = OUT_DIR / "row_level_oat_sensitivity.csv"
+OUT_CSV = OUT_DIR / "sensitivity_one_at_a_time.csv"
 
 # Baseline (best event/death config from the patient-level grid search)
 BASE_ALPHA = 0.1

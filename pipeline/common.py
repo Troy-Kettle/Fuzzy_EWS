@@ -1,6 +1,6 @@
 """Shared loading, scoring and lead-time machinery for the results/main pipeline.
 
-Both ``main_grid_search.py`` and ``main_validation.py`` import from here so the two
+Both ``grid_search_main.py``, ``validation.py`` and ``sensitivity_oat.py`` import from here so the two
 stages agree exactly on preprocessing, cohort sampling and the temporal formula
 (``engine_scoring.temporal_score`` — EWMA memory + sigmoid worsening-trend, the same
 path app/streamlit_app.py uses).
@@ -19,12 +19,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "engine"))
 import engine_scoring as es  # noqa: E402
 
 DATA_PATH   = REPO / "datasets" / "final_observations_with_targets.csv"
-MAIN_DIR    = REPO / "results" / "main"
+MAIN_DIR    = REPO / "results" / "main_dataset"
 PATIENT_DIR = MAIN_DIR / "patient level"
 ROW_DIR     = MAIN_DIR / "row-level"
 

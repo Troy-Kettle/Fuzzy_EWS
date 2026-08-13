@@ -8,9 +8,7 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR_DEFAULT = REPO_ROOT / "membership_functions" / "original"
-DATA_DIR_SIGMOID = REPO_ROOT / "membership_functions" / "sigmoid"
-# NOTE: Generated trapezoidal outputs have been removed; only sigmoid generation is supported.
+DATA_DIR_SIGMOID = REPO_ROOT / "membership_functions" / "sigmoid"   # the only set used
 
 AVPU_OPTIONS = [
     "Alert",

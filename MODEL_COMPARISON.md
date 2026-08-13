@@ -1,5 +1,12 @@
 # Fuzzy EWS — Testing Summary & Comparison
 
+> **⚠ Numbers in this document are stale.** They were generated before the model changes
+> recorded in README.md — five-set SBP everywhere, ACVPU removed from every score
+> (including NEWS-2's consciousness sub-score), inspired oxygen scored in its recorded
+> units and included in the temporal layer. Every AUROC, AUPRC, threshold and lead time
+> below therefore needs regenerating with `pipeline/grid_search_main.py` and
+> `pipeline/validation.py`. The reasoning and the methodological caveats still hold.
+
 A plain-English summary of everything we have tested. Numbers are **AUROC** (higher =
 better discrimination). Two reference systems throughout: **NEWS-2** (the clinical
 standard — note it also uses consciousness/ACVPU) and **Snapshot Fuzzy** (our fuzzy score
@@ -142,7 +149,7 @@ patients even a 0.0015 gap is significant (p < 0.001), yet it is an order of mag
 below any meaningful threshold (≈0.02). Two scores rank-correlated at 0.995 *cannot*
 produce materially different AUROCs — this is a property of the evaluation, not a bug.
 
-**We then tried hard to make Temporal genuinely distinct** (see `results/trajectory/`):
+**We then tried hard to make Temporal genuinely distinct** (see `results/_superseded/trajectory/`):
 
 | Intervention | What it changes | Event AUROC effect |
 |---|---|---|
@@ -161,7 +168,7 @@ These **decouple the rankings** (Spearman falls to 0.94–0.96 under slope/time-
 discrimination (AUROC)** — exactly consistent with §4, where the trajectory-aware
 lead-time analysis is the only place temporal wins. Reporting the Snapshot-vs-Temporal
 AUROC difference as a "win" overstates it; the honest framing is the lead-time result plus
-this coupling/DeLong caveat. Reproduce with `python trajectory_auroc_patient.py`.
+this coupling/DeLong caveat. (The trajectory script that produced this has been removed; its output is in `results/_superseded/trajectory/`.)
 
 *(Numbers above are from a 38,934-patient sample: all event patients + 25,000 controls,
-event-optimal params α=0.1, β=1.0, γ=1.0, relative excess. `results/current/` is unchanged.)*
+event-optimal params α=0.1, β=1.0, γ=1.0, relative excess. `results/_superseded/current/` holds that run.)*

@@ -33,10 +33,13 @@ repomix-output.*
 
 # ── Generated scored spreadsheets ──
 # These hold per-observation patient rows (vitals + scores) and are reproducible by
-# running the build_scored_sample_spreadsheet*.py scripts. Never commit them: the 500k
+# running pipeline/build_scored_spreadsheet_*.py. Never commit them: the 500k
 # file is ~80MB (over GitHub's limit) and both would publish patient-level clinical data.
 fuzzy_ews_scored_*.xlsx
 
 # ── Analysis outputs ──
 # ~1.8GB of figures, grid-search CSVs and per-patient score files, all regenerable.
 results/
+
+# ── Test / tooling caches ──
+.pytest_cache/

@@ -1,6 +1,6 @@
 """Validation leaves for results/main — AUROC, AUPRC and lead time at both levels.
 
-Reads the winning α/β/γ from main_grid_search.py's best_configs.csv and evaluates
+Reads the winning α/β/γ from grid_search_main.py's best_configs.csv and evaluates
 three systems (NEWS-2, Snapshot Fuzzy, Temporal Fuzzy) against three targets
 (death / ICU / event within 24 h) under every combination of:
 
@@ -19,12 +19,12 @@ Two things differ from the previous generation of this folder:
     raising apparent prevalence ~1.2% → ~18%. scored_data_full.csv is still written
     from a capped sample (file size only) — the metrics are not.
   • Lead time is measured backward from the true event time and reported at BOTH
-    levels; see main_pipeline_common.lead_time_patient / lead_time_row.
+    levels; see common.lead_time_patient / lead_time_row.
 
-Outputs → results/main/patient level/…  and  results/main/row-level/…
+Outputs → results/main_dataset/patient level/…  and  results/main_dataset/row-level/…
 """
 
-import time, warnings
+import sys, time, warnings
 from pathlib import Path
 
 import matplotlib
@@ -35,9 +35,15 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 
-import main_pipeline_common as C
-import engine_scoring as es
-from stats import delong_auc_ci, delong_roc_test
+# Set the paths explicitly rather than relying on the interpreter adding this file's
+# directory, or on common.py's own sys.path side effect, to find engine/.
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "engine"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import common as C                                              # noqa: E402
+import engine_scoring as es                                     # noqa: E402
+from stats import delong_auc_ci, delong_roc_test                # noqa: E402
 
 warnings.filterwarnings("ignore")
 np.seterr(over="ignore", invalid="ignore")
@@ -187,7 +193,7 @@ def load_param_sets():
     """Patient-level event winners under each metric, plus Sherif's fixed set."""
     best_path = C.PATIENT_DIR / "grid_search" / "best_configs.csv"
     if not best_path.exists():
-        raise FileNotFoundError(f"{best_path} missing — run main_grid_search.py first.")
+        raise FileNotFoundError(f"{best_path} missing — run pipeline/grid_search_main.py first.")
     best = pd.read_csv(best_path)
     sel = best[(best["level"] == "patient") & (best["target"] == "event")]
 
