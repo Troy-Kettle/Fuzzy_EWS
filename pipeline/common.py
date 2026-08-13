@@ -25,8 +25,18 @@ import engine_scoring as es  # noqa: E402
 
 DATA_PATH   = REPO / "datasets" / "final_observations_with_targets.csv"
 MAIN_DIR    = REPO / "results" / "main_dataset"
-PATIENT_DIR = MAIN_DIR / "patient level"
-ROW_DIR     = MAIN_DIR / "row-level"
+
+# Output tree: one folder per pipeline STAGE, split by metric level inside it. Reads as
+# "which script wrote this, then at which level", rather than the other way round.
+#   results/main_dataset/grid_search/{patient_level,row_level}/   grid_search_main.py
+#   results/main_dataset/validation/{patient_level,row_level}/    validation.py
+GRID_DIR         = MAIN_DIR / "grid_search"
+GRID_PATIENT_DIR = GRID_DIR / "patient_level"
+GRID_ROW_DIR     = GRID_DIR / "row_level"
+
+VALIDATION_DIR = MAIN_DIR / "validation"
+PATIENT_DIR    = VALIDATION_DIR / "patient_level"
+ROW_DIR        = VALIDATION_DIR / "row_level"
 
 RANDOM_SEED = 42
 NE_PATIENTS = 22_336      # non-event admissions kept for the grid-search cohort

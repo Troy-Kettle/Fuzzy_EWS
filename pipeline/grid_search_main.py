@@ -24,7 +24,7 @@ replaces).
 
 Grid: α 0.1→1.0 (×10) × β 0.0→4.5 (×10) × γ 0.1→1.0 (×10) = 1,000 combos.
 
-Outputs → results/main_dataset/{patient level, row-level}/grid_search/
+Outputs → results/main_dataset/grid_search/{patient_level, row_level}/
 """
 
 import sys, time, warnings
@@ -54,11 +54,11 @@ np.seterr(over="ignore", invalid="ignore")
 DATA_PATH    = C.DATA_PATH
 CHRONIC_PATH = REPO / "datasets" / "Annotated dataset_training_anonymised_V5_Troy (1).xlsx"
 
-PATIENT_DIR = C.PATIENT_DIR / "grid_search"
-ROW_DIR     = C.ROW_DIR / "grid_search"
+PATIENT_DIR = C.GRID_PATIENT_DIR
+ROW_DIR     = C.GRID_ROW_DIR
 for d in (PATIENT_DIR, ROW_DIR):
     d.mkdir(parents=True, exist_ok=True)
-OUT_DIR = C.MAIN_DIR
+OUT_DIR = C.GRID_DIR
 LEVELS = {"patient": PATIENT_DIR, "row": ROW_DIR}
 
 ALPHA_VALS, BETA_VALS, GAMMA_VALS = C.ALPHA_VALS, C.BETA_VALS, C.GAMMA_VALS

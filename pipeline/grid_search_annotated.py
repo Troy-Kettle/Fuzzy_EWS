@@ -24,7 +24,7 @@ pipeline/grid_search_annotated.py). The whole dataset (829 admissions,
 
 Grid: α 0.1→1.0 (×10) × β 0.0→4.5 (×10) × γ 0.1→1.0 (×10) = 1,000 combos.
 
-Outputs → results/annotated_dataset/{patient level, row-level}/grid_search/
+Outputs → results/annotated_dataset/grid_search/{patient_level, row_level}/
 """
 
 import sys, time, warnings
@@ -47,9 +47,9 @@ np.seterr(over="ignore", invalid="ignore")
 
 DATA_PATH = REPO / "datasets" / "Annotated dataset_training_anonymised_V5_Troy_with_death.xlsx"
 
-OUT_DIR     = REPO / "results" / "annotated_dataset"
-PATIENT_DIR = OUT_DIR / "patient level" / "grid_search"
-ROW_DIR     = OUT_DIR / "row-level" / "grid_search"
+OUT_DIR     = REPO / "results" / "annotated_dataset" / "grid_search"
+PATIENT_DIR = OUT_DIR / "patient_level"
+ROW_DIR     = OUT_DIR / "row_level"
 for d in (PATIENT_DIR, ROW_DIR):
     d.mkdir(parents=True, exist_ok=True)
 LEVELS = {"patient": PATIENT_DIR, "row": ROW_DIR}

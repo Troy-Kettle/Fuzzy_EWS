@@ -21,7 +21,7 @@ Two things differ from the previous generation of this folder:
   • Lead time is measured backward from the true event time and reported at BOTH
     levels; see common.lead_time_patient / lead_time_row.
 
-Outputs → results/main_dataset/patient level/…  and  results/main_dataset/row-level/…
+Outputs → results/main_dataset/validation/{patient_level, row_level}/
 """
 
 import sys, time, warnings
@@ -191,7 +191,7 @@ def plot_lead_time(curves, out_dir, label, level):
 
 def load_param_sets():
     """Patient-level event winners under each metric, plus Sherif's fixed set."""
-    best_path = C.PATIENT_DIR / "grid_search" / "best_configs.csv"
+    best_path = C.GRID_PATIENT_DIR / "best_configs.csv"
     if not best_path.exists():
         raise FileNotFoundError(f"{best_path} missing — run pipeline/grid_search_main.py first.")
     best = pd.read_csv(best_path)
